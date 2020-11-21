@@ -1,0 +1,26 @@
+[package]
+name = "deqp-runner"
+description = "Run the Vulkan conformance test suite in parallel"
+version = "0.1.0"
+authors = ["Flakebi <flakebi@t-online.de>"]
+license = "MIT OR Apache-2.0"
+edition = "2018"
+
+[features]
+default = ["bin"]
+bin = ["clap", "slog-async", "slog-term"] # Build binaries
+
+[[bin]]
+name = "deqp-runner"
+required-features = ["bin"]
+
+[dependencies]
+clap = { version = "3.0.0-beta.2", optional = true }
+futures = "0.3"
+serde = "1"
+slog = { version = "2", features = ["max_level_trace", "release_max_level_debug"] }
+slog-async = { version = "2", optional = true }
+slog-term = { version = "2", optional = true }
+thiserror = "1"
+time = "0.2"
+tokio = { version = "0.3", features = ["io-util", "macros", "process", "rt", "stream", "sync"] }
