@@ -1,0 +1,66 @@
+Writing test log into TestResults.qpa
+dEQP Core git-e69b9b7294afdc1b9dae2da54e0ea7f80b6ef70f (0xe69b9b72) starting..
+  target implementation = 'Default'
+
+Test case 'dEQP-VK.tessellation.primitive_discard.triangles_equal_spacing_ccw'..
+  Pass (OK)
+
+Test case 'dEQP-VK.tessellation.primitive_discard.triangles_equal_spacing_ccw_point_mode'..
+  Pass (OK)
+
+Test case 'dEQP-VK.tessellation.primitive_discard.triangles_equal_spacing_cw'..
+  Pass (OK)
+
+Test case 'dEQP-VK.tessellation.primitive_discard.triangles_equal_spacing_cw_point_mode'..
+  Pass (OK)
+
+Test case 'dEQP-VK.tessellation.primitive_discard.triangles_fractional_odd_spacing_ccw_valid_levels'..
+  Pass (OK)
+
+Test case 'dEQP-VK.tessellation.primitive_discard.triangles_fractional_odd_spacing_ccw'..
+  Pass (OK)
+
+Test case 'dEQP-VK.tessellation.primitive_discard.triangles_fractional_odd_spacing_ccw_point_mode_valid_levels'..
+  Pass (OK)
+
+Test case 'dEQP-VK.tessellation.primitive_discard.triangles_fractional_odd_spacing_ccw_point_mode'..
+  Pass (OK)
+
+Test case 'dEQP-VK.tessellation.primitive_discard.triangles_fractional_odd_spacing_cw_valid_levels'..
+  Pass (OK)
+
+Test case 'dEQP-VK.tessellation.primitive_discard.triangles_fractional_odd_spacing_cw'..
+  Pass (OK)
+
+Test case 'dEQP-VK.tessellation.primitive_discard.triangles_fractional_odd_spacing_cw_point_mode_valid_levels'..
+  Pass (OK)
+
+Test case 'dEQP-VK.tessellation.primitive_discard.triangles_fractional_odd_spacing_cw_point_mode'..
+  Pass (OK)
+
+Test case 'dEQP-VK.tessellation.primitive_discard.triangles_fractional_even_spacing_ccw'..
+  Pass (OK)
+
+Test case 'dEQP-VK.tessellation.primitive_discard.triangles_fractional_even_spacing_ccw_point_mode'..
+  Pass (OK)
+
+Test case 'dEQP-VK.tessellation.primitive_discard.triangles_fractional_even_spacing_cw'..
+  Pass (OK)
+
+Test case 'dEQP-VK.tessellation.primitive_discard.triangles_fractional_even_spacing_cw_point_mode'..
+  Pass (OK)
+
+Test case 'dEQP-VK.fragment_shader_interlock.basic.discard.ssbo.shading_rate_unordered.4xaa.sample_shading.512x512'..
+  NotSupported (VK_EXT_fragment_shader_interlock is not supported at vktTestCase.cpp:551)
+
+Test case 'dEQP-VK.fragment_shader_interlock.basic.discard.ssbo.shading_rate_unordered.4xaa.sample_shading.1024x1024'..
+  NotSupported (VK_EXT_fragment_shader_interlock is not supported at vktTestCase.cpp:551)
+
+DONE!
+
+Test run totals:
+  Passed:        16/18 (88.9%)
+  Failed:        0/18 (0.0%)
+  Not supported: 2/18 (11.1%)
+  Warnings:      0/18 (0.0%)
+  Waived:        0/18 (0.0%)
