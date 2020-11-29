@@ -1,3 +1,5 @@
+use std::borrow::Cow;
+use std::collections::hash_map::Entry;
 use std::collections::{HashMap, VecDeque};
 use std::ffi::OsStr;
 use std::io::Write;
@@ -9,9 +11,11 @@ use std::process::Stdio;
 use futures::future::Either;
 use futures::prelude::*;
 use futures::task::Poll;
+use genawaiter::sync::gen;
+use genawaiter::yield_;
 use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
-use slog::{debug, error, o, trace, warn, Logger};
+use slog::{debug, error, info, o, trace, warn, Logger};
 use tempfile::NamedTempFile;
 use thiserror::Error;
 use time::{Duration, OffsetDateTime};
@@ -33,6 +37,8 @@ static RESULT_VARIANTS: Lazy<HashMap<&str, TestResultType>> = Lazy::new(|| {
     result_variants.insert("InternalError", TestResultType::InternalError);
     result_variants
 });
+
+// TODO Replace all streams with gen!
 
 #[derive(Clone, Debug)]
 #[cfg_attr(feature = "bin", derive(clap::Clap))]
@@ -77,7 +83,7 @@ pub struct Options {
 }
 
 /// Different results from running a deqp test.
-#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
 pub enum TestResultType {
     Pass,
     /// Counts as success
@@ -95,7 +101,7 @@ pub enum TestResultType {
     /// The test was not executed because a fatal error happened before and aborted the whole run.
     NotRun,
     /// Failed one time but is not reproducible.
-    Flake,
+    Flake(Box<TestResultType>),
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -117,10 +123,10 @@ pub struct TestResultData<'a> {
 
 /// Same as [`TestResultData`] but with information on how to reproduce the run.
 #[derive(Debug)]
-pub struct ReproducibleTestResultData<'a> {
+pub struct ReproducibleTestResultData<'a, 'list> {
     pub data: TestResultData<'a>,
     /// The last test in this list is the one the test result is about.
-    pub run_list: &'a [&'a str],
+    pub run_list: &'list [&'a str],
     pub args: &'a [String],
 }
 
@@ -186,8 +192,8 @@ pub struct RunOptions {
 }
 
 #[derive(Debug)]
-pub enum RunTestListEvent<'a> {
-    TestResult(ReproducibleTestResultData<'a>),
+pub enum RunTestListEvent<'a, 'list> {
+    TestResult(ReproducibleTestResultData<'a, 'list>),
     DeqpError(DeqpErrorWithStdout),
 }
 
@@ -220,7 +226,7 @@ pub struct TestResultEntry<'a> {
     pub data: TestResultData<'a>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Eq, PartialEq)]
 enum BisectState {
     /// Default state
     Unknown,
@@ -244,7 +250,7 @@ enum Job<'a> {
     ThirdRun { list: &'a [&'a str] },
     /// Bisect tests run before to see if some interaction causes the problem.
     Bisect {
-        list: &'a [&'a str],
+        list: Vec<&'a str>,
         state: BisectState,
     },
 }
@@ -272,10 +278,10 @@ struct RunDeqpState {
     child: tokio::process::Child,
 }
 
-struct RunTestListState<'a, S: Stream<Item = DeqpEvent>> {
+struct RunTestListState<'a, 'list, S: Stream<Item = DeqpEvent>> {
     logger: Logger,
     /// Input to the process that was last started.
-    tests: &'a [&'a str],
+    tests: &'list [&'a str],
     options: &'a RunOptions,
     running: Option<S>,
     /// Index into current `tests` and start time.
@@ -313,7 +319,19 @@ impl DeqpError {
 impl TestResultType {
     /// If the test result is a failure and the test should be retested.
     pub fn is_failure(&self) -> bool {
-        matches!(self, Self::Fail | Self::Crash | Self::Timeout | Self::Flake)
+        matches!(self, Self::Fail | Self::Crash | Self::Timeout | Self::Flake(_))
+    }
+
+    /// Merges the result with a new result and marks it as flake if necessary.
+    ///
+    /// The returned `bool` is `false` if the new result should be ignored because it is succeeding,
+    /// while it was failing before.
+    pub fn merge(self, other: Self) -> (Self, bool) {
+        if self.is_failure() && !other.is_failure() {
+            (Self::Flake(Box::new(self)), false)
+        } else {
+            (other, true)
+        }
     }
 }
 
@@ -390,7 +408,7 @@ impl RunDeqpState {
                         return Some(DeqpEvent::TestEnd {
                             result: TestResult {
                                 stdout: mem::replace(&mut self.stdout, String::new()),
-                                variant: *res,
+                                variant: res.clone(),
                             },
                         });
                     }
@@ -443,8 +461,8 @@ impl RunDeqpState {
     }
 }
 
-impl<'a, S: Stream<Item = DeqpEvent>> RunTestListState<'a, S> {
-    fn new(logger: Logger, tests: &'a [&'a str], options: &'a RunOptions) -> Self {
+impl<'a, 'list, S: Stream<Item = DeqpEvent>> RunTestListState<'a, 'list, S> {
+    fn new(logger: Logger, tests: &'list [&'a str], options: &'a RunOptions) -> Self {
         RunTestListState {
             logger,
             tests,
@@ -541,7 +559,9 @@ impl<'a, S: Stream<Item = DeqpEvent>> RunTestListState<'a, S> {
                                 {
                                     write!(&mut f, "/usr/bin/env -S ")?;
                                 }
-                                writeln!(&mut f, "{}", self.options.args.join(" "))?;
+                                writeln!(&mut f, "{}", self.options.args.iter().map(|a| {
+                                    a.replace('\n', "\\n")
+                                }).collect::<Vec<_>>().join(" "))?;
 
                                 // Write tests
                                 for t in self.tests {
@@ -593,7 +613,7 @@ impl<'a, S: Stream<Item = DeqpEvent>> RunTestListState<'a, S> {
         }
     }
 
-    fn handle_test_end(&mut self, result: TestResult) -> Option<RunTestListEvent<'a>> {
+    fn handle_test_end(&mut self, result: TestResult) -> Option<RunTestListEvent<'a, 'list>> {
         trace!(self.logger, "Test end"; "cur_test" => ?self.cur_test, "result" => ?result);
         if let Some(cur_test) = self.cur_test.take() {
             self.last_finished = Some(cur_test.0);
@@ -630,7 +650,7 @@ impl<'a, S: Stream<Item = DeqpEvent>> RunTestListState<'a, S> {
         result: Result<(), DeqpError>,
         stdout: String,
         stderr: String,
-    ) -> Option<RunTestListEvent<'a>> {
+    ) -> Option<RunTestListEvent<'a, 'list>> {
         trace!(self.logger, "Finished"; "result" => ?result, "stdout" => &stdout,
             "stderr" => &stderr);
         let run_list = self.tests;
@@ -668,8 +688,7 @@ impl<'a, S: Stream<Item = DeqpEvent>> RunTestListState<'a, S> {
                     args: &self.options.args,
                 }));
             } else {
-                // No test executed or crashed in between tests, counts as fatal
-                // error
+                // No test executed or crashed in between tests, counts as fatal error
                 self.tests = &[];
                 trace!(self.logger, "Deqp exited without running tests, aborting"; "error" => ?e);
                 return Some(RunTestListEvent::DeqpError(DeqpErrorWithStdout {
@@ -738,25 +757,12 @@ impl<'a> Job<'a> {
                             RunTestListEvent::TestResult(res) => {
                                 let is_failure = res.data.result.variant.is_failure();
                                 // Start third run if the test succeeded when run in isolation
+                                let entry = res.data.into();
                                 if !is_failure {
-                                    let new_job =
-                                        JobEvent::NewJob(Job::ThirdRun { list: res.run_list });
-                                    let entry = JobEvent::RunLogEntry(RunLogEntry::TestResult(
-                                        TestResultEntry {
-                                            id: 0,
-                                            data: TestResultData {
-                                                result: TestResult {
-                                                    variant: TestResultType::Flake,
-                                                    ..res.data.result
-                                                },
-                                                ..res.data
-                                            },
-                                        },
-                                    ));
+                                    let new_job = JobEvent::NewJob(Job::ThirdRun { list });
                                     Either::Left(stream::iter(vec![entry, new_job]))
                                 } else {
-                                    // Return either so we do not need to allocate for non-failures
-                                    Either::Right(stream::iter(Some(res.data.into())))
+                                    Either::Right(stream::iter(Some(entry)))
                                 }
                             }
                             RunTestListEvent::DeqpError(e) => {
@@ -769,22 +775,36 @@ impl<'a> Job<'a> {
             Self::ThirdRun { list } => {
                 // Run the whole list again
                 let logger2 = logger.clone();
-                // TODO Check that the list is not splitted and ignore errors for other tests
+                let last_test = list[list.len() - 1];
+                debug!(logger2, "Third run test"; "len" => list.len());
                 Box::new(run_test_list(logger, list, options).flat_map(move |r| {
                     trace!(logger2, "Third run test result");
                     match r {
                         RunTestListEvent::TestResult(res) => {
+                            if res.data.name != last_test {
+                                // Ignore if there is not the test we are testing
+                                return Either::Right(stream::iter(None));
+                            }
                             let is_failure = res.data.result.variant.is_failure();
-                            let entry = res.data.into();
                             // If this run failed again, start to bisect.
+                            let entry = res.data.into();
                             if is_failure {
+                                // Don't care if only a subset was run, we got the failure anyway
                                 let new_job = JobEvent::NewJob(Job::Bisect {
-                                    list: res.run_list,
+                                    list: res.run_list.to_vec(),
                                     state: BisectState::Unknown,
                                 });
                                 Either::Left(stream::iter(vec![entry, new_job]))
                             } else {
-                                // Return either so we do not need to allocate for non-failures
+                                if res.run_list != list {
+                                    // We only ran a subset (a test in-between probably crashed)
+                                    info!(logger2, "Reproducing failure in third run failed \
+                                        because not the whole test list was run, this can happen \
+                                        because of intermediate failures";
+                                        "last_failing_test" => list[list.len() - res.run_list.len()]
+                                    );
+                                }
+
                                 Either::Right(stream::iter(Some(entry)))
                             }
                         }
@@ -794,7 +814,74 @@ impl<'a> Job<'a> {
                     }
                 }))
             }
-            Self::Bisect { list, state } => Box::new(stream::empty()),
+            Self::Bisect { list, state } => {
+                let split_i = (list.len() - 1) / 2;
+                let last_test = list[list.len() - 1];
+                Box::new(gen!({
+                    if list.len() <= 2 {
+                        trace!(logger, "Bisect succeeded, two tests or less left");
+                        return;
+                    }
+
+                    let test_list = match state {
+                        BisectState::Unknown => {
+                            // Test with last half
+                            trace!(logger, "Bisect run with last half");
+                            Cow::Borrowed(&list[split_i..])
+                        }
+                        BisectState::SucceedingWithLastHalf => {
+                            // Test with first half
+                            let mut tests = list[..split_i].to_vec();
+                            tests.push(last_test);
+                            trace!(logger, "Bisect run with first half"; "tests" => ?tests);
+                            Cow::Owned(tests)
+                        }
+                    };
+
+                    let mut test_list_stream =
+                        run_test_list(logger.clone(), test_list.as_ref(), options);
+                    while let Some(r) = test_list_stream.next().await {
+                        trace!(logger, "Bisect run test result");
+                        match r {
+                            RunTestListEvent::TestResult(res) => {
+                                if res.data.name != last_test {
+                                    // Ignore if there is not the test we are testing
+                                    continue;
+                                }
+                                let is_failure = res.data.result.variant.is_failure();
+                                // If this run failed again, start to bisect.
+                                yield_!(res.data.into());
+                                if is_failure {
+                                    // Don't care if only a subset was run, we got the failure
+                                    // anyway
+                                    let new_job = JobEvent::NewJob(Job::Bisect {
+                                        list: res.run_list.to_vec(),
+                                        state: BisectState::Unknown,
+                                    });
+                                    yield_!(new_job);
+                                } else {
+                                    if state == BisectState::SucceedingWithLastHalf {
+                                        debug!(
+                                            logger,
+                                            "Unable to reproduce failure with either half"
+                                        );
+                                    } else {
+                                        // The error can be in the other half
+                                        let new_job = JobEvent::NewJob(Job::Bisect {
+                                            list: list.clone(),
+                                            state: BisectState::SucceedingWithLastHalf,
+                                        });
+                                        yield_!(new_job);
+                                    }
+                                }
+                            }
+                            RunTestListEvent::DeqpError(e) => {
+                                yield_!(e.into());
+                            }
+                        }
+                    }
+                }))
+            }
         }
     }
 }
@@ -928,11 +1015,11 @@ pub fn run_deqp<S: AsRef<OsStr> + std::fmt::Debug>(
 /// Run a list of tests and restart the process with remaining tests if it crashed.
 ///
 /// Also record missing tests and the test lists when failures occured.
-pub fn run_test_list<'a>(
+pub fn run_test_list<'a, 'list>(
     logger: Logger,
-    tests: &'a [&'a str],
+    tests: &'list [&'a str],
     options: &'a RunOptions,
-) -> impl Stream<Item = RunTestListEvent<'a>> {
+) -> impl Stream<Item = RunTestListEvent<'a, 'list>> + Send + Unpin {
     let mut state = RunTestListState::new(logger, tests, options);
 
     stream::poll_fn(move |ctx| {
@@ -1029,14 +1116,14 @@ pub fn run_tests_parallel<'a>(
 
     stream::poll_fn(move |ctx| {
         loop {
-            while job_executor.len() < job_count && !pending_jobs.is_empty() {
+            while job_executor.len() < job_count {
                 if let Some(job) = pending_jobs.pop_front() {
                     let logger = logger.new(o!("job" => job_id));
                     job_id += 1;
                     debug!(logger, "Adding job to queue");
                     job_executor.push(job.run(logger, options).into_future());
                 } else {
-                    debug!(logger, "No jobs left in queue");
+                    break;
                 }
             }
 
@@ -1076,14 +1163,31 @@ pub fn run_tests_parallel<'a>(
                                 RunLogEntry::TestResult(res) => {
                                     res.id = log_entry_id;
                                     log_entry_id += 1;
-                                    summary.insert(
-                                        res.data.name,
-                                        SummaryEntry {
-                                            name: res.data.name,
-                                            result: res.data.result.variant,
-                                            run_id: Some(res.id),
-                                        },
-                                    );
+                                    match summary.entry(res.data.name) {
+                                        Entry::Occupied(mut entry) => {
+                                            let old_id = entry.get().run_id;
+                                            // Merge result variants
+                                            let old = entry.get().result.clone();
+                                            let new = res.data.result.variant.clone();
+                                            let (result, take_new) = old.merge(new);
+                                            entry.insert(SummaryEntry {
+                                                name: res.data.name,
+                                                result,
+                                                run_id: if take_new {
+                                                    Some(res.id)
+                                                } else {
+                                                    old_id
+                                                },
+                                            });
+                                        }
+                                        Entry::Vacant(entry) => {
+                                            entry.insert(SummaryEntry {
+                                                name: res.data.name,
+                                                result: res.data.result.variant.clone(),
+                                                run_id: Some(res.id),
+                                            });
+                                        }
+                                    }
                                 }
                                 RunLogEntry::DeqpError(e) => {
                                     if e.error.is_fatal() {

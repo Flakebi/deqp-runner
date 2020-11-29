@@ -48,9 +48,3 @@ Test case 'dEQP-VK.tessellation.primitive_discard.triangles_fractional_even_spac
   Pass (OK)
 
 Test case 'dEQP-VK.tessellation.primitive_discard.triangles_fractional_even_spacing_cw_point_mode'..
-  Pass (OK)
-
-Test case 'dEQP-VK.fragment_shader_interlock.basic.discard.ssbo.shading_rate_unordered.4xaa.sample_shading.512x512'..
-  NotSupported (VK_EXT_fragment_shader_interlock is not supported at vktTestCase.cpp:551)
-
-Test case 'dEQP-VK.fragment_shader_interlock.basic.discard.ssbo.shading_rate_unordered.4xaa.sample_shading.1024x1024'..
