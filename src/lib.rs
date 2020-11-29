@@ -6,16 +6,19 @@ use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::process::Stdio;
 
+use futures::future::Either;
 use futures::prelude::*;
 use futures::task::Poll;
 use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
 use slog::{debug, error, o, trace, warn, Logger};
+use tempfile::NamedTempFile;
 use thiserror::Error;
 use time::{Duration, OffsetDateTime};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::prelude::*;
-use tokio::process::Command;
+use tokio::process::{Child, ChildStderr, ChildStdout, Command};
+use tokio::time::Sleep;
 
 /// This many tests will be executed with a single deqp run.
 const BATCH_SIZE: usize = 1000;
@@ -25,9 +28,9 @@ static RESULT_VARIANTS: Lazy<HashMap<&str, TestResultType>> = Lazy::new(|| {
     result_variants.insert("Pass", TestResultType::Pass);
     result_variants.insert("CompatibilityWarning", TestResultType::CompatibilityWarning);
     result_variants.insert("QualityWarning", TestResultType::QualityWarning);
+    result_variants.insert("NotSupported", TestResultType::NotSupported);
     result_variants.insert("Fail", TestResultType::Fail);
     result_variants.insert("InternalError", TestResultType::InternalError);
-    result_variants.insert("NotSupported", TestResultType::NotSupported);
     result_variants
 });
 
@@ -81,9 +84,10 @@ pub enum TestResultType {
     CompatibilityWarning,
     /// Counts as success
     QualityWarning,
+    /// Counts as success
+    NotSupported,
     Fail,
     InternalError,
-    NotSupported,
     Crash,
     Timeout,
     /// Test should be executed but was not found in the output.
@@ -145,6 +149,8 @@ pub enum DeqpError {
     /// Fatal error
     #[error("deqp encountered a fatal error")]
     FatalError,
+    #[error("deqp timed out")]
+    Timeout,
     #[error("deqp exited with {exit_status:?}")]
     Crash { exit_status: Option<i32> },
 }
@@ -174,7 +180,7 @@ pub enum DeqpEvent {
 pub struct RunOptions {
     pub args: Vec<String>,
     pub capture_dumps: bool,
-    pub timeout: Duration,
+    pub timeout: std::time::Duration,
     /// Directory where failure dumps should be created.
     pub fail_dir: Option<PathBuf>,
 }
@@ -218,8 +224,14 @@ pub struct TestResultEntry<'a> {
 enum BisectState {
     /// Default state
     Unknown,
-    /// Running the test after only the last half of the tests succeeds.
+    /// Running the test with only the last half of the tests succeeds.
     SucceedingWithLastHalf,
+}
+
+#[derive(Debug)]
+enum JobEvent<'a> {
+    RunLogEntry(RunLogEntry<'a>),
+    NewJob(Job<'a>),
 }
 
 #[derive(Debug)]
@@ -237,10 +249,27 @@ enum Job<'a> {
     },
 }
 
-#[derive(Debug)]
-enum JobEvent<'a> {
-    RunLogEntry(RunLogEntry<'a>),
-    NewJob(Job<'a>),
+struct RunDeqpState {
+    logger: Logger,
+    timeout_duration: std::time::Duration,
+    timeout: Sleep,
+    stdout_reader: io::Lines<BufReader<ChildStdout>>,
+    stderr_reader: io::Lines<BufReader<ChildStderr>>,
+    /// Buffer for stdout
+    stdout: String,
+    /// Buffer for stderr
+    stderr: String,
+    stdout_finished: bool,
+    stderr_finished: bool,
+    /// Process exited
+    finished: bool,
+    has_timeout: bool,
+    tests_done: bool,
+    /// deqp reported a fatal error on stderr
+    has_fatal_error: bool,
+    /// Process exit status
+    finished_result: Option<Result<(), DeqpError>>,
+    child: tokio::process::Child,
 }
 
 struct RunTestListState<'a, S: Stream<Item = DeqpEvent>> {
@@ -253,6 +282,11 @@ struct RunTestListState<'a, S: Stream<Item = DeqpEvent>> {
     cur_test: Option<(usize, OffsetDateTime)>,
     last_finished: Option<usize>,
 
+    /// Temporary file that contains the test list and is passed to deqp.
+    test_list_file: Option<NamedTempFile>,
+    /// If the current run had a failure and we already created a failure dir, this is the
+    /// directory.
+    fail_dir: Option<String>,
     /// How many tests were skipped.
     skipped: usize,
 }
@@ -272,7 +306,140 @@ mod serde_io_error {
 
 impl DeqpError {
     pub fn is_fatal(&self) -> bool {
-        matches!(self, Self::SpawnFailed(_))
+        matches!(self, Self::SpawnFailed(_) | Self::FatalError)
+    }
+}
+
+impl TestResultType {
+    /// If the test result is a failure and the test should be retested.
+    pub fn is_failure(&self) -> bool {
+        matches!(self, Self::Fail | Self::Crash | Self::Timeout | Self::Flake)
+    }
+}
+
+impl<'a> From<TestResultData<'a>> for JobEvent<'a> {
+    /// Do not forget to fill out the run id afterwards.
+    fn from(data: TestResultData<'a>) -> Self {
+        Self::RunLogEntry(RunLogEntry::TestResult(TestResultEntry { id: 0, data }))
+    }
+}
+
+impl<'a> From<DeqpErrorWithStdout> for JobEvent<'a> {
+    fn from(err: DeqpErrorWithStdout) -> Self {
+        Self::RunLogEntry(RunLogEntry::DeqpError(err))
+    }
+}
+
+impl RunDeqpState {
+    fn new(mut logger: Logger, timeout_duration: std::time::Duration, mut child: Child) -> Self {
+        if let Some(id) = child.id() {
+            logger = logger.new(o!("pid" => id));
+        }
+
+        let stdout = child.stdout.take().unwrap();
+        let stderr = child.stderr.take().unwrap();
+        Self {
+            logger,
+            timeout_duration,
+            timeout: tokio::time::sleep(timeout_duration),
+            stdout_reader: BufReader::new(stdout).lines(),
+            stderr_reader: BufReader::new(stderr).lines(),
+            stdout: String::new(),
+            stderr: String::new(),
+            stdout_finished: false,
+            stderr_finished: false,
+            finished: false,
+            has_timeout: false,
+            tests_done: false,
+            has_fatal_error: false,
+            finished_result: None,
+            child,
+        }
+    }
+
+    fn handle_stdout_line(
+        &mut self,
+        l: Result<Option<String>, std::io::Error>,
+    ) -> Option<DeqpEvent> {
+        let l = match l {
+            Ok(r) => r,
+            Err(e) => {
+                self.stdout_finished = true;
+                debug!(self.logger, "Failed to read stdout of process"; "error" => %e);
+                return None;
+            }
+        };
+        if let Some(l) = l {
+            if self.tests_done {
+                if !l.is_empty() {
+                    self.stdout.push_str(&l);
+                    self.stdout.push('\n');
+                }
+                return None;
+            }
+
+            if let Some(l) = l.strip_prefix("  ") {
+                for (s, res) in &*RESULT_VARIANTS {
+                    if let Some(l) = l.strip_prefix(s) {
+                        let mut l = l.trim();
+                        if l.starts_with('(') && l.ends_with(')') {
+                            l = &l[1..l.len() - 1];
+                        }
+                        self.stdout.push_str(l);
+                        self.timeout = tokio::time::sleep(self.timeout_duration);
+                        return Some(DeqpEvent::TestEnd {
+                            result: TestResult {
+                                stdout: mem::replace(&mut self.stdout, String::new()),
+                                variant: *res,
+                            },
+                        });
+                    }
+                }
+            }
+
+            if let Some(l) = l.strip_prefix("TEST: ") {
+                return Some(DeqpEvent::TestStart {
+                    name: l.to_string(),
+                });
+            } else if let Some(l) = l.strip_prefix("Test case '") {
+                if let Some(l) = l.strip_suffix("'..") {
+                    self.stdout.clear();
+                    return Some(DeqpEvent::TestStart { name: l.into() });
+                } else {
+                    self.stdout.push_str(&l);
+                    self.stdout.push('\n');
+                }
+            } else if l == "DONE!" {
+                self.tests_done = true;
+            } else if l.is_empty() {
+            } else {
+                self.stdout.push_str(&l);
+                self.stdout.push('\n');
+            }
+        } else {
+            self.stdout_finished = true;
+        }
+        None
+    }
+
+    fn handle_stderr_line(&mut self, l: Result<Option<String>, std::io::Error>) {
+        let l = match l {
+            Ok(r) => r,
+            Err(e) => {
+                self.stderr_finished = true;
+                debug!(self.logger, "Failed to read stderr of process"; "error" => %e);
+                return;
+            }
+        };
+        if let Some(l) = l {
+            if l.contains("FATAL ERROR: ") {
+                self.has_fatal_error = true;
+            }
+            self.stderr.push_str(&l);
+            self.stderr.push('\n');
+        } else {
+            self.stderr_finished = true;
+        }
     }
 }
 
@@ -286,6 +453,8 @@ impl<'a, S: Stream<Item = DeqpEvent>> RunTestListState<'a, S> {
             cur_test: None,
             last_finished: None,
 
+            test_list_file: None,
+            fail_dir: None,
             skipped: 0,
         }
     }
@@ -297,6 +466,120 @@ impl<'a, S: Stream<Item = DeqpEvent>> RunTestListState<'a, S> {
                 .as_ref()
                 .map(|t| t.0 >= self.tests.len())
                 .unwrap_or_default()
+    }
+
+    /// Start a new deqp process.
+    ///
+    /// Returns the arguments for starting the process.
+    /// We cannot start the process here because we cannot name the type of [`run_deqp`].
+    fn start(&mut self) -> Result<Vec<String>, DeqpErrorWithStdout> {
+        // TODO pipeline dumps
+        // Create a temporary file for the test list
+        let mut temp_file = NamedTempFile::new().map_err(|e| DeqpErrorWithStdout {
+            error: DeqpError::FatalError,
+            stdout: format!("Failed to create temporary file for test list: {}", e),
+        })?;
+        for t in self.tests {
+            writeln!(&mut temp_file, "{}", t).map_err(|e| DeqpErrorWithStdout {
+                error: DeqpError::FatalError,
+                stdout: format!("Failed to write temporary file for test list: {}", e),
+            })?;
+        }
+
+        let mut args = self.options.args.clone();
+        args.push(
+            temp_file
+                .path()
+                .as_os_str()
+                .to_str()
+                .ok_or_else(|| DeqpErrorWithStdout {
+                    error: DeqpError::FatalError,
+                    stdout: format!(
+                        "Failed to get name of temporary file for test list (path: {:?})",
+                        temp_file.path()
+                    ),
+                })?
+                .into(),
+        );
+        self.cur_test = None;
+        self.last_finished = None;
+        self.fail_dir = None;
+        self.test_list_file = Some(temp_file);
+        Ok(args)
+    }
+
+    fn create_fail_dir(&mut self, failed_test: &str) {
+        if self.fail_dir.is_some() {
+            return;
+        }
+        if let Some(dir) = &self.options.fail_dir {
+            for i in 0.. {
+                let dir_name = if i == 0 {
+                    failed_test.to_string()
+                } else {
+                    format!("{}-{}", failed_test, i)
+                };
+                let new_dir = dir.join(&dir_name);
+                if !new_dir.exists() {
+                    if let Err(e) = std::fs::create_dir_all(&new_dir) {
+                        error!(self.logger, "Failed to create failure directory"; "error" => %e);
+                        return;
+                    }
+                    self.fail_dir = Some(dir_name);
+                    // Write reproduce-list.txt
+                    match std::fs::File::create(new_dir.join("reproduce-list.txt")) {
+                        Ok(mut f) => {
+                            if let Err(e) = (|| -> Result<(), std::io::Error> {
+                                // Write options
+                                write!(&mut f, "#!")?;
+                                if self
+                                    .options
+                                    .args
+                                    .first()
+                                    .map(|a| !a.starts_with('/'))
+                                    .unwrap_or_default()
+                                {
+                                    write!(&mut f, "/usr/bin/env -S ")?;
+                                }
+                                writeln!(&mut f, "{}", self.options.args.join(" "))?;
+
+                                // Write tests
+                                for t in self.tests {
+                                    writeln!(&mut f, "{}", t)?;
+                                }
+                                Ok(())
+                            })() {
+                                error!(self.logger, "Failed to write reproduce list";
+                                    "error" => %e);
+                            }
+                        }
+                        Err(e) => {
+                            error!(self.logger, "Failed to create reproduce list file";
+                                "error" => %e);
+                        }
+                    }
+                    break;
+                }
+            }
+        }
+    }
+
+    /// Save stderr to the current `fail_dir` if there is one.
+    fn save_fail_dir_stderr(&self, stderr: &str) {
+        if let Some(dir_name) = &self.fail_dir {
+            let fail_dir = self.options.fail_dir.as_ref().unwrap().join(dir_name);
+            // Save stderr
+            match std::fs::File::create(fail_dir.join("stderr.txt")) {
+                Ok(mut f) => {
+                    if let Err(e) = f.write_all(stderr.as_bytes()) {
+                        error!(self.logger, "Failed to write stderr file"; "error" => %e);
+                    }
+                }
+                Err(e) => {
+                    error!(self.logger, "Failed to create stderr file"; "error" => %e);
+                }
+            }
+        }
     }
 
     fn handle_test_start(&mut self, name: &str) {
@@ -315,13 +598,22 @@ impl<'a, S: Stream<Item = DeqpEvent>> RunTestListState<'a, S> {
         if let Some(cur_test) = self.cur_test.take() {
             self.last_finished = Some(cur_test.0);
             let duration = OffsetDateTime::now_utc() - cur_test.1;
+            let is_failure = result.variant.is_failure();
+            if is_failure {
+                self.create_fail_dir(self.tests[cur_test.0]);
+            }
+
             Some(RunTestListEvent::TestResult(ReproducibleTestResultData {
                 data: TestResultData {
                     name: self.tests[cur_test.0],
                     result,
                     start: cur_test.1,
                     duration,
-                    fail_dir: None, // TODO Create on error
+                    fail_dir: if is_failure {
+                        self.fail_dir.clone()
+                    } else {
+                        None
+                    },
                 },
                 run_list: &self.tests[..cur_test.0 + 1],
                 args: &self.options.args,
@@ -343,22 +635,34 @@ impl<'a, S: Stream<Item = DeqpEvent>> RunTestListState<'a, S> {
             "stderr" => &stderr);
         let run_list = self.tests;
         self.running = None;
+        self.save_fail_dir_stderr(&stderr);
+
         if let Err(e) = result {
             if let Some(cur_test) = self.cur_test {
+                let duration = OffsetDateTime::now_utc() - cur_test.1;
+                if self.fail_dir.is_none() {
+                    self.create_fail_dir(run_list[cur_test.0]);
+                    self.save_fail_dir_stderr(&stderr);
+                }
+
                 // Continue testing
                 let run_list = &self.tests[..cur_test.0 + 1];
                 self.tests = &run_list[cur_test.0 + 1..];
-                let duration = OffsetDateTime::now_utc() - cur_test.1;
+
                 return Some(RunTestListEvent::TestResult(ReproducibleTestResultData {
                     data: TestResultData {
                         name: run_list[cur_test.0],
                         result: TestResult {
                             stdout,
-                            variant: TestResultType::Crash,
+                            variant: if matches!(e, DeqpError::Timeout) {
+                                TestResultType::Timeout
+                            } else {
+                                TestResultType::Crash
+                            },
                         },
                         start: cur_test.1,
                         duration,
-                        fail_dir: None, // TODO Create
+                        fail_dir: self.fail_dir.clone(),
                     },
                     run_list,
                     args: &self.options.args,
@@ -367,8 +671,9 @@ impl<'a, S: Stream<Item = DeqpEvent>> RunTestListState<'a, S> {
                 // No test executed or crashed in between tests, counts as fatal
                 // error
                 self.tests = &[];
+                trace!(self.logger, "Deqp exited without running tests, aborting"; "error" => ?e);
                 return Some(RunTestListEvent::DeqpError(DeqpErrorWithStdout {
-                    error: e,
+                    error: DeqpError::FatalError,
                     stdout,
                 }));
             }
@@ -398,29 +703,97 @@ impl<'a> Job<'a> {
     fn run(self, logger: Logger, options: &'a RunOptions) -> impl Stream<Item = JobEvent<'a>> {
         match self {
             Self::FirstRun { list } => {
-                debug!(logger, "First run");
                 let logger2 = logger.clone();
                 let res: Box<dyn Stream<Item = _> + Send + Unpin> =
-                    Box::new(run_test_list(logger, list, options).map(move |r| {
-                        trace!(logger2, "Test result");
+                    Box::new(run_test_list(logger, list, options).flat_map(move |r| {
+                        trace!(logger2, "First run test result");
                         match r {
                             RunTestListEvent::TestResult(res) => {
-                                // TODO Start next job
-                                JobEvent::RunLogEntry(RunLogEntry::TestResult(TestResultEntry {
-                                    id: 0, // Will be filled in later
-                                    data: res.data,
-                                }))
+                                let is_failure = res.data.result.variant.is_failure();
+                                let entry = res.data.into();
+                                // Start second run for failed tests
+                                if is_failure {
+                                    let new_job =
+                                        JobEvent::NewJob(Job::SecondRun { list: res.run_list });
+                                    Either::Left(stream::iter(vec![entry, new_job]))
+                                } else {
+                                    // Return either so we do not need to allocate for non-failures
+                                    Either::Right(stream::iter(Some(entry)))
+                                }
                             }
                             RunTestListEvent::DeqpError(e) => {
-                                JobEvent::RunLogEntry(RunLogEntry::DeqpError(e))
+                                Either::Right(stream::iter(Some(e.into())))
                             }
-                            //=> JobEvent::NewJob(),
                         }
                     }));
                 res
             }
-            Self::SecondRun { list } => Box::new(stream::empty()),
-            Self::ThirdRun { list } => Box::new(stream::empty()),
+            Self::SecondRun { list } => {
+                // Run only the failing test (which is the last in the list)
+                let logger2 = logger.clone();
+                Box::new(
+                    run_test_list(logger, &list[list.len() - 1..], options).flat_map(move |r| {
+                        trace!(logger2, "Second run test result");
+                        match r {
+                            RunTestListEvent::TestResult(res) => {
+                                let is_failure = res.data.result.variant.is_failure();
+                                // Start third run if the test succeeded when run in isolation
+                                if !is_failure {
+                                    let new_job =
+                                        JobEvent::NewJob(Job::ThirdRun { list: res.run_list });
+                                    let entry = JobEvent::RunLogEntry(RunLogEntry::TestResult(
+                                        TestResultEntry {
+                                            id: 0,
+                                            data: TestResultData {
+                                                result: TestResult {
+                                                    variant: TestResultType::Flake,
+                                                    ..res.data.result
+                                                },
+                                                ..res.data
+                                            },
+                                        },
+                                    ));
+                                    Either::Left(stream::iter(vec![entry, new_job]))
+                                } else {
+                                    // Return either so we do not need to allocate for non-failures
+                                    Either::Right(stream::iter(Some(res.data.into())))
+                                }
+                            }
+                            RunTestListEvent::DeqpError(e) => {
+                                Either::Right(stream::iter(Some(e.into())))
+                            }
+                        }
+                    }),
+                )
+            }
+            Self::ThirdRun { list } => {
+                // Run the whole list again
+                let logger2 = logger.clone();
+                // TODO Check that the list is not splitted and ignore errors for other tests
+                Box::new(run_test_list(logger, list, options).flat_map(move |r| {
+                    trace!(logger2, "Third run test result");
+                    match r {
+                        RunTestListEvent::TestResult(res) => {
+                            let is_failure = res.data.result.variant.is_failure();
+                            let entry = res.data.into();
+                            // If this run failed again, start to bisect.
+                            if is_failure {
+                                let new_job = JobEvent::NewJob(Job::Bisect {
+                                    list: res.run_list,
+                                    state: BisectState::Unknown,
+                                });
+                                Either::Left(stream::iter(vec![entry, new_job]))
+                            } else {
+                                // Return either so we do not need to allocate for non-failures
+                                Either::Right(stream::iter(Some(entry)))
+                            }
+                        }
+                        RunTestListEvent::DeqpError(e) => {
+                            Either::Right(stream::iter(Some(e.into())))
+                        }
+                    }
+                }))
+            }
             Self::Bisect { list, state } => Box::new(stream::empty()),
         }
     }
@@ -448,9 +821,11 @@ pub fn parse_test_file(content: &str) -> Vec<&str> {
 /// The started process gets killed on drop.
 pub fn run_deqp<S: AsRef<OsStr> + std::fmt::Debug>(
     logger: Logger,
+    timeout_duration: std::time::Duration,
     args: &[S],
     env: &[(&str, &str)],
 ) -> impl Stream<Item = DeqpEvent> {
+    debug!(logger, "Start deqp"; "args" => ?args);
     let mut cmd = Command::new(&args[0]);
     cmd.args(&args[1..])
         .envs(env.iter().cloned())
@@ -459,135 +834,63 @@ pub fn run_deqp<S: AsRef<OsStr> + std::fmt::Debug>(
         .kill_on_drop(true);
 
     trace!(logger, "Run deqp"; "args" => ?args);
-    let mut child = match cmd.spawn() {
+    let child = match cmd.spawn() {
         Ok(r) => r,
         Err(e) => {
             let r: Pin<Box<dyn Stream<Item = DeqpEvent> + Send>> =
                 Box::pin(stream::once(future::ready(DeqpEvent::Finished {
                     result: Err(DeqpError::SpawnFailed(e)),
-                    stdout: "".into(),
-                    stderr: "".into(),
+                    stdout: String::new(),
+                    stderr: String::new(),
                 })));
             return r;
         }
     };
 
-    let stdout = child.stdout.take().unwrap();
-    let stderr = child.stderr.take().unwrap();
-
-    struct StreamState<R1, R2> {
-        logger: Logger,
-        stdout_reader: io::Lines<R1>,
-        stderr_reader: io::Lines<R2>,
-        stdout: String,
-        stderr: String,
-        stdout_finished: bool,
-        stderr_finished: bool,
-        finished: bool,
-        tests_done: bool,
-        has_fatal_error: bool,
-        finished_result: Option<Result<(), DeqpError>>,
-        child: tokio::process::Child,
-    }
-
-    let state = StreamState {
-        logger,
-        stdout_reader: BufReader::new(stdout).lines(),
-        stderr_reader: BufReader::new(stderr).lines(),
-        stdout: String::new(),
-        stderr: String::new(),
-        stdout_finished: false,
-        stderr_finished: false,
-        finished: false,
-        tests_done: false,
-        has_fatal_error: false,
-        finished_result: None,
-        child,
-    };
+    let state = RunDeqpState::new(logger, timeout_duration, child);
 
     Box::pin(stream::unfold(state, |mut state| async {
         // Continue reading stdout and stderr even when the process exited
-        if state.finished && state.stdout_finished && state.stderr_finished {
-            return None;
-        }
         loop {
-            // TODO Handle timeout
+            if state.has_timeout {
+                match state.finished_result.take() {
+                    Some(mut result) => {
+                        if state.has_fatal_error {
+                            result = Err(DeqpError::FatalError);
+                        }
+                        return Some((
+                            DeqpEvent::Finished {
+                                result,
+                                stdout: mem::replace(&mut state.stdout, String::new()),
+                                stderr: mem::replace(&mut state.stderr, String::new()),
+                            },
+                            state,
+                        ));
+                    }
+                    None => {
+                        // Kill deqp
+                        let logger = state.logger;
+                        let mut child = state.child;
+                        tokio::spawn(async move {
+                            if let Err(e) = child.kill().await {
+                                error!(logger, "Failed to kill deqp after timeout"; "error" => %e);
+                            }
+                        });
+                        return None;
+                    }
+                }
+            }
+
             tokio::select! {
                 // Stdout
                 l = state.stdout_reader.next_line(), if !state.stdout_finished => {
-                    let l = match l {
-                        Ok(r) => r,
-                        Err(e) => {
-                            state.stdout_finished = true;
-                            debug!(state.logger, "Failed to read stdout of process"; "error" => %e);
-                            continue;
-                        }
-                    };
-                    if let Some(l) = l {
-                        if state.tests_done {
-                            if !l.is_empty() {
-                                state.stdout.push_str(&l);
-                                state.stdout.push('\n');
-                            }
-                            continue;
-                        }
-
-                        if let Some(l) = l.strip_prefix("  ") {
-                            for (s, res) in &*RESULT_VARIANTS {
-                                if let Some(l) = l.strip_prefix(s) {
-                                    let mut l = l.trim();
-                                    if l.starts_with('(') && l.ends_with(')') {
-                                        l = &l[1..l.len() - 1];
-                                    }
-                                    state.stdout.push_str(l);
-                                    return Some((DeqpEvent::TestEnd { result: TestResult {
-                                        stdout: mem::replace(&mut state.stdout, String::new()),
-                                        variant: *res,
-                                    } }, state));
-                                }
-                            }
-                        }
-
-                        if let Some(l) = l.strip_prefix("TEST: ") {
-                            return Some((DeqpEvent::TestStart { name: l.to_string() }, state));
-                        } else if let Some(l) = l.strip_prefix("Test case '") {
-                            if let Some(l) = l.strip_suffix("'..") {
-                                state.stdout.clear();
-                                return Some((DeqpEvent::TestStart { name: l.into() }, state));
-                            } else {
-                                state.stdout.push_str(&l);
-                                state.stdout.push('\n');
-                            }
-                        } else if l == "DONE!" {
-                            state.tests_done = true;
-                        } else if l.is_empty() {
-                        } else {
-                            state.stdout.push_str(&l);
-                            state.stdout.push('\n');
-                        }
-                    } else {
-                        state.stdout_finished = true;
+                    if let Some(r) = state.handle_stdout_line(l) {
+                        return Some((r, state));
                     }
                 }
                 // Stderr
                 l = state.stderr_reader.next_line(), if !state.stderr_finished => {
-                    let l = match l {
-                        Ok(r) => r,
-                        Err(e) => {
-                            state.stderr_finished = true;
-                            debug!(state.logger, "Failed to read stderr of process"; "error" => %e);
-                            continue;
-                        }
-                    };
-                    if let Some(l) = l {
-                        if l.contains("FATAL ERROR: ") {
-                            state.has_fatal_error = true;
-                        }
-                        state.stderr.push_str(&l);
-                        state.stderr.push('\n');
-                    } else {
-                        state.stderr_finished = true;
-                    }
+                    state.handle_stderr_line(l);
                 }
                 // Wait for process in parallel so it can make progress
                 r = state.child.wait(), if !state.finished => {
@@ -597,6 +900,11 @@ pub fn run_deqp<S: AsRef<OsStr> + std::fmt::Debug>(
                         Err(e) => Err(DeqpError::WaitFailed(e)),
                     });
                     state.finished = true;
+                }
+                _ = &mut state.timeout, if !state.has_timeout && !state.finished => {
+                    debug!(state.logger, "Detected timeout");
+                    state.has_timeout = true;
+                    state.finished_result = Some(Err(DeqpError::Timeout));
                 }
                 // Return finished here as stdout and stderr are completely read
                 else => match state.finished_result.take() {
@@ -653,13 +961,15 @@ pub fn run_test_list<'a>(
                 return Poll::Ready(None);
             }
             if state.running.is_none() {
-                // Start new process
-                // TODO pipeline dumps
-                // TODO Create a temporary file for the test list
-                let args = options.args.clone();
-                state.running = Some(run_deqp(state.logger.clone(), &args, &[]));
-                state.cur_test = None;
-                state.last_finished = None;
+                let args = match state.start() {
+                    Ok(r) => r,
+                    Err(e) => {
+                        // Cannot create test list, fatal error
+                        state.tests = &[];
+                        return Poll::Ready(Some(RunTestListEvent::DeqpError(e)));
+                    }
+                };
+                state.running = Some(run_deqp(state.logger.clone(), options.timeout, &args, &[]));
             }
 
             match state.running.as_mut().unwrap().poll_next_unpin(ctx) {
@@ -717,7 +1027,6 @@ pub fn run_tests_parallel<'a>(
         }
     });
 
-    // TODO Write test log
     stream::poll_fn(move |ctx| {
         loop {
             while job_executor.len() < job_count && !pending_jobs.is_empty() {
@@ -759,22 +1068,25 @@ pub fn run_tests_parallel<'a>(
                     return Poll::Ready(None);
                 }
                 Poll::Ready(Some((None, _))) => {} // Job ended
-                Poll::Ready(Some((Some(r), job_stream))) => {
+                Poll::Ready(Some((Some(event), job_stream))) => {
                     let mut fatal_error = false;
-                    match r {
+                    match event {
                         JobEvent::RunLogEntry(mut entry) => {
                             match &mut entry {
                                 RunLogEntry::TestResult(res) => {
                                     res.id = log_entry_id;
                                     log_entry_id += 1;
-                                    summary.insert(res.data.name, SummaryEntry {
-                                        name: res.data.name,
-                                        result: res.data.result.variant,
-                                        run_id: Some(res.id),
-                                    });
+                                    summary.insert(
+                                        res.data.name,
+                                        SummaryEntry {
+                                            name: res.data.name,
+                                            result: res.data.result.variant,
+                                            run_id: Some(res.id),
+                                        },
+                                    );
                                 }
                                 RunLogEntry::DeqpError(e) => {
-                                    if let DeqpError::FatalError = e.error {
+                                    if e.error.is_fatal() {
                                         fatal_error = true;
                                     }
                                 }
@@ -792,7 +1104,7 @@ pub fn run_tests_parallel<'a>(
                                 trace!(logger, "Log"; "entry" => ?entry);
                             }
                         }
-                        JobEvent::NewJob(j) => pending_jobs.push_back(j),
+                        JobEvent::NewJob(job) => pending_jobs.push_back(job),
                     }
 
                     if fatal_error {

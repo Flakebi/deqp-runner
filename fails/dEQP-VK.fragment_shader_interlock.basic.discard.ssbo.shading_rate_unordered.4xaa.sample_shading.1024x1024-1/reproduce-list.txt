@@ -1,0 +1,2 @@
+#!/usr/bin/env -S test/test-timeout.sh logs/d /dev/null 1
+dEQP-VK.fragment_shader_interlock.basic.discard.ssbo.shading_rate_unordered.4xaa.sample_shading.1024x1024
