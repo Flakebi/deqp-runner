@@ -8,7 +8,8 @@ edition = "2018"
 
 [features]
 default = ["bin"]
-bin = ["anyhow", "clap", "num_cpus", "slog-async", "slog-envlogger", "slog-term", "tokio/rt"] # Build binaries
+# Build binaries
+bin = ["anyhow", "clap", "num_cpus", "slog-async", "slog-envlogger", "slog-term", "tokio/rt", "tokio/signal"]
 
 [[bin]]
 name = "deqp-runner"
@@ -20,6 +21,7 @@ clap = { version = "3.0.0-beta.2", optional = true }
 csv = "1.1"
 futures = "0.3"
 genawaiter = { version = "0.99", features = ["futures03"] }
+indicatif = "0.15"
 num_cpus = { version = "1", optional = true }
 once_cell = "1"
 rand = "0.7"

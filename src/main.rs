@@ -1,11 +1,11 @@
-use clap::Clap;
+use std::collections::HashMap;
 
 use anyhow::Result;
+use clap::Clap;
 use deqp_runner::*;
 use rand::seq::SliceRandom;
 use rand::thread_rng;
 use slog::{info, o, Drain};
-use tokio::stream::StreamExt;
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<()> {
@@ -13,9 +13,17 @@ async fn main() -> Result<()> {
 }
 
 // TODO Add executable that generates mapping between cts test and pipelines
+// TODO Add executable that generates summary from run log
+// TODO Abort on Ctrl+C/sigint (add test!)
+// TODO Add test for timeout: --timeout 5 -t logs/in test/test-timeout.sh logs/d /dev/null 1
+// TODO Add test for bisecting: -t logs/in test/bisect-test-runner.sh dEQP-VK.tessellation.primitive_discard.triangles_fractional_odd_spacing_ccw_valid_levels logs/d /dev/null 1 logs/a /dev/null 0
 
 async fn real_main() -> Result<()> {
-    if std::env::var("RUST_LOG").is_err() {
+    let mut options: Options = Options::parse();
+
+    let does_log = std::env::var("RUST_LOG").is_ok();
+    // We can have either logging or a progress bar, choose logging by default
+    if !does_log && !options.progress {
         std::env::set_var("RUST_LOG", "info");
     }
 
@@ -27,8 +35,6 @@ async fn real_main() -> Result<()> {
 
         slog::Logger::root(drain, o!())
     };
-
-    let mut options: Options = Options::parse();
 
     // Read test file
     let test_file = tokio::fs::read_to_string(&options.tests).await?;
@@ -64,22 +70,30 @@ async fn real_main() -> Result<()> {
         fail_dir: Some(options.failures),
     };
 
+    let progress_bar = if !does_log && options.progress {
+        Some(indicatif::ProgressBar::new(1))
+    } else {
+        None
+    };
+
     let job_count = options.jobs.unwrap_or_else(num_cpus::get);
-    let mut running = run_tests_parallel(
-        &logger,
-        &tests,
-        &run_options,
-        Some(&options.log),
-        Some(&options.output),
-        job_count,
-    );
-
-    // TODO Handle ctrl+c
-    // TODO Show progress bar
-
-    while let Some(res) = running.next().await {
-        slog::debug!(logger, "Result"; "res" => ?res);
+    let mut summary = HashMap::new();
+    tokio::select! {
+        _ = run_tests_parallel(
+            &logger,
+            &tests,
+            &mut summary,
+            &run_options,
+            Some(&options.log),
+            job_count,
+            progress_bar.as_ref(),
+        ) => {}
+        _ = tokio::signal::ctrl_c() => {
+            info!(logger, "Killed by sigint");
+        }
     }
+
+    write_summary(&tests, &summary, Some(&options.csv_summary), Some(&options.xml_summary))?;
 
     Ok(())
 }

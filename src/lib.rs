@@ -13,6 +13,7 @@ use futures::prelude::*;
 use futures::task::Poll;
 use genawaiter::sync::gen;
 use genawaiter::yield_;
+use indicatif::ProgressBar;
 use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
 use slog::{debug, error, info, o, trace, warn, Logger};
@@ -54,17 +55,25 @@ pub struct Options {
     /// This can uncover bugs that are not detected normally.
     #[cfg_attr(feature = "bin", clap(long))]
     pub shuffle: bool,
+    /// Show progress bar.
+    #[cfg_attr(feature = "bin", clap(short, long))]
+    pub progress: bool,
     /// Start of test range from test list.
     #[cfg_attr(feature = "bin", clap(long))]
     pub start: Option<usize>,
     /// End of test range from test list.
     #[cfg_attr(feature = "bin", clap(long))]
     pub end: Option<usize>,
-    /// Path for the output summary file.
+    /// Path for the csv summary file.
     ///
     /// Writes a csv file with one line for every run test.
     #[cfg_attr(feature = "bin", clap(short, long, default_value = "summary.csv"))]
-    pub output: PathBuf,
+    pub csv_summary: PathBuf,
+    /// Path for the junit xml file.
+    ///
+    /// Writes an xml file in the junit format containing the failures.
+    #[cfg_attr(feature = "bin", clap(short, long, default_value = "summary.xml"))]
+    pub xml_summary: PathBuf,
     /// Path for the log file.
     ///
     /// Writes a json file with one line for every entry.
@@ -305,6 +314,15 @@ struct RunTestListState<'a, 'list, S: Stream<Item = DeqpEvent>> {
     fail_dir: Option<String>,
     /// How many tests were skipped.
     skipped: usize,
+}
+
+/// Failure when writing the summary file
+#[derive(Debug, Error)]
+pub enum WriteSummaryError {
+    #[error("Failed to write summary file: {0}")]
+    WriteFile(#[source] csv::Error),
+    #[error("Failed to open summary file: {0}")]
+    OpenFile(#[source] csv::Error),
 }
 
 mod serde_io_error {
@@ -572,9 +590,16 @@ impl<'a, 'list, S: Stream<Item = DeqpEvent>> RunTestListState<'a, 'list, S> {
                                 {
                                     write!(&mut f, "/usr/bin/env -S ")?;
                                 }
-                                writeln!(&mut f, "{}", self.options.args.iter().map(|a| {
-                                    a.replace('\n', "\\n")
-                                }).collect::<Vec<_>>().join(" "))?;
+                                writeln!(
+                                    &mut f,
+                                    "{}",
+                                    self.options
+                                        .args
+                                        .iter()
+                                        .map(|a| { a.replace('\n', "\\n") })
+                                        .collect::<Vec<_>>()
+                                        .join(" ")
+                                )?;
 
                                 // Write tests
                                 for t in self.tests {
@@ -1111,14 +1136,42 @@ pub fn run_test_list<'a, 'list>(
     })
 }
 
-pub fn run_tests_parallel<'a>(
+/// Write summary csv and xml file.
+pub fn write_summary<'a>(
+    tests: &[&'a str],
+    summary: &HashMap<&'a str, SummaryEntry>,
+    csv_file: Option<&Path>,
+    xml_file: Option<&Path>,
+) -> Result<(), WriteSummaryError> {
+    if let Some(file) = csv_file {
+        // Write summary
+        let mut writer = csv::Writer::from_path(file).map_err(WriteSummaryError::OpenFile)?;
+        for t in tests {
+            let r = summary.get(t).map(Cow::Borrowed).unwrap_or_else(|| Cow::Owned(SummaryEntry {
+                name: t,
+                result: TestResultType::NotRun,
+                run_id: None,
+            }));
+            writer.serialize(r).map_err(WriteSummaryError::WriteFile)?;
+        }
+    }
+    // TODO Write xml
+    if let Some(_file) = xml_file {
+        // Write only failures
+    }
+    Ok(())
+}
+
+pub async fn run_tests_parallel<'a>(
     logger: &'a Logger,
     tests: &'a [&'a str],
+    // Map test names to summary entries
+    summary: &mut HashMap<&'a str, SummaryEntry<'a>>,
     options: &'a RunOptions,
     log_file: Option<&'a Path>,
-    summary_file: Option<&'a Path>,
     job_count: usize,
-) -> impl Stream<Item = SummaryEntry<'a>> + 'a {
+    progress_bar: Option<&ProgressBar>,
+) {
     let mut pending_jobs: VecDeque<Job<'a>> = tests
         .chunks(BATCH_SIZE)
         .map(|list| Job::FirstRun { list })
@@ -1126,127 +1179,111 @@ pub fn run_tests_parallel<'a>(
 
     // New jobs can be added to this list
     let mut job_executor = stream::FuturesUnordered::new();
+    // The total number of jobs added to the executor
     let mut job_id: u64 = 0;
     let mut log_entry_id: u64 = 0;
+    if let Some(pb) = progress_bar {
+        pb.set_length(pending_jobs.len() as u64);
+        pb.set_prefix("Test job");
+    }
 
-    // Map test names to summary entries
-    let mut summary = HashMap::<&'a str, SummaryEntry>::new();
-
-    // TODO Use async to write into file?
-    let mut log = log_file.and_then(|f| match std::fs::File::create(f) {
-        Ok(r) => Some(r),
-        Err(e) => {
-            error!(logger, "Failed to create log file"; "error" => %e);
-            None
+    let mut log = if let Some(log_file) = log_file {
+        match std::fs::File::create(log_file) {
+            Ok(r) => Some(r),
+            Err(e) => {
+                error!(logger, "Failed to create log file"; "error" => %e);
+                None
+            }
         }
-    });
+    } else {
+        None
+    };
 
-    // TODO Use gen! and exit on sigint and ctrl+c
-    stream::poll_fn(move |ctx| {
-        loop {
-            while job_executor.len() < job_count {
-                if let Some(job) = pending_jobs.pop_front() {
-                    let logger = logger.new(o!("job" => job_id));
-                    job_id += 1;
-                    debug!(logger, "Adding job to queue");
-                    job_executor.push(job.run(logger, options).into_future());
+    loop {
+        while job_executor.len() < job_count {
+            if let Some(job) = pending_jobs.pop_front() {
+                let logger = logger.new(o!("job" => job_id));
+                job_id += 1;
+                debug!(logger, "Adding job to queue");
+                job_executor.push(job.run(logger, options).into_future());
+            } else {
+                break;
+            }
+        }
+
+        match job_executor.next().await {
+            None => break,
+            Some((None, _)) => {
+                debug!(logger, "Job finished");
+                if let Some(pb) = progress_bar {
+                    pb.inc(1);
+                    debug_assert_eq!(pb.position(), job_id - job_executor.len() as u64);
+                }
+            }
+            Some((Some(event), job_stream)) => {
+                let mut fatal_error = false;
+                match event {
+                    JobEvent::RunLogEntry(mut entry) => {
+                        match &mut entry {
+                            RunLogEntry::TestResult(res) => {
+                                res.id = log_entry_id;
+                                log_entry_id += 1;
+                                match summary.entry(res.data.name) {
+                                    Entry::Occupied(mut entry) => {
+                                        let old_id = entry.get().run_id;
+                                        // Merge result variants
+                                        let old = entry.get().result.clone();
+                                        let new = res.data.result.variant.clone();
+                                        let (result, take_new) = old.merge(new);
+                                        entry.insert(SummaryEntry {
+                                            name: res.data.name,
+                                            result,
+                                            run_id: if take_new { Some(res.id) } else { old_id },
+                                        });
+                                    }
+                                    Entry::Vacant(entry) => {
+                                        entry.insert(SummaryEntry {
+                                            name: res.data.name,
+                                            result: res.data.result.variant.clone(),
+                                            run_id: Some(res.id),
+                                        });
+                                    }
+                                }
+                            }
+                            RunLogEntry::DeqpError(e) => {
+                                if e.error.is_fatal() {
+                                    fatal_error = true;
+                                }
+                            }
+                        }
+
+                        if let Some(f) = &mut log {
+                            if let Err(e) = serde_json::to_writer(&mut *f, &entry) {
+                                error!(logger, "Failed to write entry into log file";
+                                    "error" => %e, "entry" => ?entry);
+                            }
+                            if let Err(e) = f.write_all(b"\n") {
+                                error!(logger, "Failed to write into log file"; "error" => %e);
+                            }
+                        } else {
+                            trace!(logger, "Log"; "entry" => ?entry);
+                        }
+                    }
+                    JobEvent::NewJob(job) => {
+                        pending_jobs.push_back(job);
+                        if let Some(pb) = progress_bar {
+                            pb.inc_length(1);
+                        }
+                    }
+                }
+
+                if fatal_error {
+                    pending_jobs.clear();
+                    job_executor = stream::FuturesUnordered::new();
                 } else {
-                    break;
-                }
-            }
-
-            match job_executor.poll_next_unpin(ctx) {
-                Poll::Pending => return Poll::Pending,
-                Poll::Ready(None) => {
-                    if let Some(summary_file) = summary_file {
-                        // Write summary
-                        match csv::Writer::from_path(summary_file) {
-                            Ok(mut writer) => {
-                                for t in tests {
-                                    let r = summary.remove(t).unwrap_or_else(|| SummaryEntry {
-                                        name: t,
-                                        result: TestResultType::NotRun,
-                                        run_id: None,
-                                    });
-                                    if let Err(e) = writer.serialize(r) {
-                                        error!(logger, "Failed to write summary file";
-                                            "error" => %e);
-                                        break;
-                                    }
-                                }
-                            }
-                            Err(e) => {
-                                error!(logger, "Failed to open summary file"; "error" => %e);
-                            }
-                        }
-                    }
-                    return Poll::Ready(None);
-                }
-                Poll::Ready(Some((None, _))) => {} // Job ended
-                Poll::Ready(Some((Some(event), job_stream))) => {
-                    let mut fatal_error = false;
-                    match event {
-                        JobEvent::RunLogEntry(mut entry) => {
-                            match &mut entry {
-                                RunLogEntry::TestResult(res) => {
-                                    res.id = log_entry_id;
-                                    log_entry_id += 1;
-                                    match summary.entry(res.data.name) {
-                                        Entry::Occupied(mut entry) => {
-                                            let old_id = entry.get().run_id;
-                                            // Merge result variants
-                                            let old = entry.get().result.clone();
-                                            let new = res.data.result.variant.clone();
-                                            let (result, take_new) = old.merge(new);
-                                            entry.insert(SummaryEntry {
-                                                name: res.data.name,
-                                                result,
-                                                run_id: if take_new {
-                                                    Some(res.id)
-                                                } else {
-                                                    old_id
-                                                },
-                                            });
-                                        }
-                                        Entry::Vacant(entry) => {
-                                            entry.insert(SummaryEntry {
-                                                name: res.data.name,
-                                                result: res.data.result.variant.clone(),
-                                                run_id: Some(res.id),
-                                            });
-                                        }
-                                    }
-                                }
-                                RunLogEntry::DeqpError(e) => {
-                                    if e.error.is_fatal() {
-                                        fatal_error = true;
-                                    }
-                                }
-                            }
-
-                            if let Some(f) = &mut log {
-                                if let Err(e) = serde_json::to_writer(&mut *f, &entry) {
-                                    error!(logger, "Failed to write entry into log file";
-                                        "error" => %e, "entry" => ?entry);
-                                }
-                                if let Err(e) = f.write_all(b"\n") {
-                                    error!(logger, "Failed to write into log file"; "error" => %e);
-                                }
-                            } else {
-                                trace!(logger, "Log"; "entry" => ?entry);
-                            }
-                        }
-                        JobEvent::NewJob(job) => pending_jobs.push_back(job),
-                    }
-
-                    if fatal_error {
-                        pending_jobs.clear();
-                        job_executor = stream::FuturesUnordered::new();
-                    } else {
-                        job_executor.push(job_stream.into_future());
-                    }
+                    job_executor.push(job_stream.into_future());
                 }
             }
         }
-    })
+    }
 }
