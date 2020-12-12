@@ -34,6 +34,13 @@ async fn real_main() -> Result<()> {
     let test_file = tokio::fs::read_to_string(&options.tests).await?;
     let mut tests = parse_test_file(&test_file);
 
+    if let Some(end) = options.end {
+        tests.truncate(end);
+    }
+    if let Some(start) = options.start {
+        tests.drain(..std::cmp::min(start, tests.len()));
+    }
+
     if options.shuffle {
         let mut rng = thread_rng();
         tests.shuffle(&mut rng);
@@ -54,7 +61,7 @@ async fn real_main() -> Result<()> {
         args: options.run_command,
         capture_dumps: true,
         timeout: std::time::Duration::from_secs(options.timeout.into()),
-        fail_dir: options.failures,
+        fail_dir: Some(options.failures),
     };
 
     let job_count = options.jobs.unwrap_or_else(num_cpus::get);
@@ -62,8 +69,8 @@ async fn real_main() -> Result<()> {
         &logger,
         &tests,
         &run_options,
-        options.log.as_deref(),
-        options.output.as_deref(),
+        Some(&options.log),
+        Some(&options.output),
         job_count,
     );
 

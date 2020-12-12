@@ -39,12 +39,14 @@ static RESULT_VARIANTS: Lazy<HashMap<&str, TestResultType>> = Lazy::new(|| {
 });
 
 // TODO Replace all streams with gen!
+// TODO Do not mark as missing after timeout or crash
 
 #[derive(Clone, Debug)]
 #[cfg_attr(feature = "bin", derive(clap::Clap))]
 #[cfg_attr(feature = "bin", clap(version = clap::crate_version!(), author = clap::crate_authors!(),
     about = clap::crate_description!()))]
 pub struct Options {
+    /// Instances of deqp to run, defaults to cpu count.
     #[cfg_attr(feature = "bin", clap(short, long))]
     pub jobs: Option<usize>,
     /// Shuffle tests before running.
@@ -52,31 +54,36 @@ pub struct Options {
     /// This can uncover bugs that are not detected normally.
     #[cfg_attr(feature = "bin", clap(long))]
     pub shuffle: bool,
+    /// Start of test range from test list.
+    #[cfg_attr(feature = "bin", clap(long))]
+    pub start: Option<usize>,
+    /// End of test range from test list.
+    #[cfg_attr(feature = "bin", clap(long))]
+    pub end: Option<usize>,
     /// Path for the output summary file.
     ///
     /// Writes a csv file with one line for every run test.
-    #[cfg_attr(feature = "bin", clap(short, long))]
-    pub output: Option<PathBuf>,
+    #[cfg_attr(feature = "bin", clap(short, long, default_value = "summary.csv"))]
+    pub output: PathBuf,
     /// Path for the log file.
     ///
     /// Writes a json file with one line for every entry.
-    #[cfg_attr(feature = "bin", clap(short, long))]
-    pub log: Option<PathBuf>,
+    #[cfg_attr(feature = "bin", clap(short, long, default_value = "log.json"))]
+    pub log: PathBuf,
     /// Path for the failure data.
     ///
     /// Every failed test gets a folder with stdout, stderr and other data to reproduce.
-    #[cfg_attr(feature = "bin", clap(long))]
-    pub failures: Option<PathBuf>,
+    #[cfg_attr(feature = "bin", clap(long, default_value = "fails"))]
+    pub failures: PathBuf,
     /// A file with tests to run.
     #[cfg_attr(feature = "bin", clap(short, long))]
     pub tests: PathBuf,
     /// Timout for a single test in seconds.
     ///
     /// A test that runs this long is considered failing.
-    #[cfg_attr(feature = "bin", clap(long, default_value = "600"))]
+    #[cfg_attr(feature = "bin", clap(long, default_value = "60"))]
     pub timeout: u32,
-    // TODO Is deqp called like this?
-    /// The deqp command to run. E.g. `./deqp --caselist-file`
+    /// The deqp command to run. E.g. `./deqp-vk --deqp-caselist-file`
     ///
     /// A filename with the tests cases that should be run is appended to the command.
     pub run_command: Vec<String>,
@@ -152,6 +159,8 @@ pub enum DeqpError {
         #[serde(with = "serde_io_error")]
         std::io::Error,
     ),
+    #[error("deqp encountered a fatal error")]
+    DeqpFatalError,
     /// Fatal error
     #[error("deqp encountered a fatal error")]
     FatalError,
@@ -162,9 +171,10 @@ pub enum DeqpError {
 }
 
 #[derive(Debug, Deserialize, Serialize)]
-pub struct DeqpErrorWithStdout {
+pub struct DeqpErrorWithOutput {
     error: DeqpError,
     stdout: String,
+    stderr: String,
 }
 
 #[derive(Debug)]
@@ -194,7 +204,7 @@ pub struct RunOptions {
 #[derive(Debug)]
 pub enum RunTestListEvent<'a, 'list> {
     TestResult(ReproducibleTestResultData<'a, 'list>),
-    DeqpError(DeqpErrorWithStdout),
+    DeqpError(DeqpErrorWithOutput),
 }
 
 /// Lines of the `summary.csv` file.
@@ -214,7 +224,7 @@ pub struct SummaryEntry<'a> {
 pub enum RunLogEntry<'a> {
     TestResult(#[serde(borrow)] TestResultEntry<'a>),
     /// Error that happened independant of a test.
-    DeqpError(DeqpErrorWithStdout),
+    DeqpError(DeqpErrorWithOutput),
 }
 
 /// Entry for a test result in the run log.
@@ -342,8 +352,8 @@ impl<'a> From<TestResultData<'a>> for JobEvent<'a> {
     }
 }
 
-impl<'a> From<DeqpErrorWithStdout> for JobEvent<'a> {
-    fn from(err: DeqpErrorWithStdout) -> Self {
+impl<'a> From<DeqpErrorWithOutput> for JobEvent<'a> {
+    fn from(err: DeqpErrorWithOutput) -> Self {
         Self::RunLogEntry(RunLogEntry::DeqpError(err))
     }
 }
@@ -490,17 +500,19 @@ impl<'a, 'list, S: Stream<Item = DeqpEvent>> RunTestListState<'a, 'list, S> {
     ///
     /// Returns the arguments for starting the process.
     /// We cannot start the process here because we cannot name the type of [`run_deqp`].
-    fn start(&mut self) -> Result<Vec<String>, DeqpErrorWithStdout> {
+    fn start(&mut self) -> Result<Vec<String>, DeqpErrorWithOutput> {
         // TODO pipeline dumps
         // Create a temporary file for the test list
-        let mut temp_file = NamedTempFile::new().map_err(|e| DeqpErrorWithStdout {
+        let mut temp_file = NamedTempFile::new().map_err(|e| DeqpErrorWithOutput {
             error: DeqpError::FatalError,
-            stdout: format!("Failed to create temporary file for test list: {}", e),
+            stdout: String::new(),
+            stderr: format!("Failed to create temporary file for test list: {}", e),
         })?;
         for t in self.tests {
-            writeln!(&mut temp_file, "{}", t).map_err(|e| DeqpErrorWithStdout {
+            writeln!(&mut temp_file, "{}", t).map_err(|e| DeqpErrorWithOutput {
                 error: DeqpError::FatalError,
-                stdout: format!("Failed to write temporary file for test list: {}", e),
+                stdout: String::new(),
+                stderr: format!("Failed to write temporary file for test list: {}", e),
             })?;
         }
 
@@ -510,9 +522,10 @@ impl<'a, 'list, S: Stream<Item = DeqpEvent>> RunTestListState<'a, 'list, S> {
                 .path()
                 .as_os_str()
                 .to_str()
-                .ok_or_else(|| DeqpErrorWithStdout {
+                .ok_or_else(|| DeqpErrorWithOutput {
                     error: DeqpError::FatalError,
-                    stdout: format!(
+                    stdout: String::new(),
+                    stderr: format!(
                         "Failed to get name of temporary file for test list (path: {:?})",
                         temp_file.path()
                     ),
@@ -687,13 +700,19 @@ impl<'a, 'list, S: Stream<Item = DeqpEvent>> RunTestListState<'a, 'list, S> {
                     run_list,
                     args: &self.options.args,
                 }));
+            } else if let Some(last_finished) = self.last_finished {
+                // No current test executed, so probably some tests are failing
+                // Mark rest of tests as missing
+                self.skipped = self.tests.len() - last_finished - 1;
+                self.tests = &[];
             } else {
                 // No test executed or crashed in between tests, counts as fatal error
                 self.tests = &[];
-                trace!(self.logger, "Deqp exited without running tests, aborting"; "error" => ?e);
-                return Some(RunTestListEvent::DeqpError(DeqpErrorWithStdout {
+                warn!(self.logger, "Deqp exited without running tests, aborting"; "error" => ?e);
+                return Some(RunTestListEvent::DeqpError(DeqpErrorWithOutput {
                     error: DeqpError::FatalError,
                     stdout,
+                    stderr,
                 }));
             }
         } else {
@@ -702,11 +721,9 @@ impl<'a, 'list, S: Stream<Item = DeqpEvent>> RunTestListState<'a, 'list, S> {
                     "cur_test" => self.tests[cur_test.0], "started" => %cur_test.1);
             }
             if let Some(last_finished) = self.last_finished {
-                self.tests = &run_list[last_finished + 1..];
-                if !self.tests.is_empty() {
-                    warn!(self.logger, "deqp finished without running all tests, ignoring";
-                        "last_finished" => self.tests[last_finished]);
-                }
+                // Mark rest of tests as missing
+                self.skipped = self.tests.len() - last_finished - 1;
+                self.tests = &[];
             } else {
                 // No test executed, counts all tests as missing
                 self.skipped = self.tests.len();
@@ -943,7 +960,7 @@ pub fn run_deqp<S: AsRef<OsStr> + std::fmt::Debug>(
                 match state.finished_result.take() {
                     Some(mut result) => {
                         if state.has_fatal_error {
-                            result = Err(DeqpError::FatalError);
+                            result = Err(DeqpError::DeqpFatalError);
                         }
                         return Some((
                             DeqpEvent::Finished {
@@ -997,7 +1014,7 @@ pub fn run_deqp<S: AsRef<OsStr> + std::fmt::Debug>(
                 else => match state.finished_result.take() {
                     Some(mut result) => {
                         if state.has_fatal_error {
-                            result = Err(DeqpError::FatalError);
+                            result = Err(DeqpError::DeqpFatalError);
                         }
                         return Some((DeqpEvent::Finished {
                             result,
@@ -1026,11 +1043,21 @@ pub fn run_test_list<'a, 'list>(
         loop {
             if state.skipped > 0 {
                 state.skipped -= 1;
-                let cur_test = state.cur_test.as_ref().unwrap().0;
+                let run_list = state.tests;
+
+                let skipped_test = if let Some(cur_test) = state.cur_test {
+                    cur_test.0 - state.skipped - 1
+                } else {
+                    if state.skipped == 0 {
+                        state.tests = &[];
+                    }
+                    state.tests.len() - state.skipped - 1
+                };
+
                 return Poll::Ready(Some(RunTestListEvent::TestResult(
                     ReproducibleTestResultData {
                         data: TestResultData {
-                            name: state.tests[cur_test - state.skipped - 1],
+                            name: run_list[skipped_test],
                             result: TestResult {
                                 stdout: String::new(),
                                 variant: TestResultType::Missing,
@@ -1039,7 +1066,7 @@ pub fn run_test_list<'a, 'list>(
                             duration: Duration::new(0, 0),
                             fail_dir: None,
                         },
-                        run_list: &state.tests[..cur_test - state.skipped],
+                        run_list: &run_list[..skipped_test + 1],
                         args: &options.args,
                     },
                 )));
@@ -1114,6 +1141,7 @@ pub fn run_tests_parallel<'a>(
         }
     });
 
+    // TODO Use gen! and exit on sigint and ctrl+c
     stream::poll_fn(move |ctx| {
         loop {
             while job_executor.len() < job_count {
@@ -1137,7 +1165,7 @@ pub fn run_tests_parallel<'a>(
                                 for t in tests {
                                     let r = summary.remove(t).unwrap_or_else(|| SummaryEntry {
                                         name: t,
-                                        result: TestResultType::Missing,
+                                        result: TestResultType::NotRun,
                                         run_id: None,
                                     });
                                     if let Err(e) = writer.serialize(r) {
