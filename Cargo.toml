@@ -35,3 +35,7 @@ tempfile = "3"
 thiserror = "1"
 time = { version = "0.2", features = ["serde"] }
 tokio = { version = "0.3", features = ["fs", "io-util", "macros", "process", "stream", "sync", "time"] }
+
+[dev-dependencies]
+anyhow = "1"
+num_cpus = "1"

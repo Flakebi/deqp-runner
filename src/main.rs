@@ -14,9 +14,6 @@ async fn main() -> Result<()> {
 
 // TODO Add executable that generates mapping between cts test and pipelines
 // TODO Add executable that generates summary from run log
-// TODO Abort on Ctrl+C/sigint (add test!)
-// TODO Add test for timeout: --timeout 5 -t logs/in test/test-timeout.sh logs/d /dev/null 1
-// TODO Add test for bisecting: -t logs/in test/bisect-test-runner.sh dEQP-VK.tessellation.primitive_discard.triangles_fractional_odd_spacing_ccw_valid_levels logs/d /dev/null 1 logs/a /dev/null 0
 
 async fn real_main() -> Result<()> {
     let mut options: Options = Options::parse();

@@ -10,7 +10,6 @@ use std::process::Stdio;
 
 use futures::future::Either;
 use futures::prelude::*;
-use futures::task::Poll;
 use genawaiter::sync::gen;
 use genawaiter::yield_;
 use indicatif::ProgressBar;
@@ -38,9 +37,6 @@ static RESULT_VARIANTS: Lazy<HashMap<&str, TestResultType>> = Lazy::new(|| {
     result_variants.insert("InternalError", TestResultType::InternalError);
     result_variants
 });
-
-// TODO Replace all streams with gen!
-// TODO Do not mark as missing after timeout or crash
 
 #[derive(Clone, Debug)]
 #[cfg_attr(feature = "bin", derive(clap::Clap))]
@@ -312,8 +308,6 @@ struct RunTestListState<'a, 'list, S: Stream<Item = DeqpEvent>> {
     /// If the current run had a failure and we already created a failure dir, this is the
     /// directory.
     fail_dir: Option<String>,
-    /// How many tests were skipped.
-    skipped: usize,
 }
 
 /// Failure when writing the summary file
@@ -501,17 +495,7 @@ impl<'a, 'list, S: Stream<Item = DeqpEvent>> RunTestListState<'a, 'list, S> {
 
             test_list_file: None,
             fail_dir: None,
-            skipped: 0,
         }
-    }
-
-    fn is_finished(&self) -> bool {
-        self.tests.is_empty()
-            || self
-                .cur_test
-                .as_ref()
-                .map(|t| t.0 >= self.tests.len())
-                .unwrap_or_default()
     }
 
     /// Start a new deqp process.
@@ -640,14 +624,35 @@ impl<'a, 'list, S: Stream<Item = DeqpEvent>> RunTestListState<'a, 'list, S> {
         }
     }
 
-    fn handle_test_start(&mut self, name: &str) {
+    fn get_missing(&self, count: usize) -> Vec<RunTestListEvent<'a, 'list>> {
+        let start = self.last_finished.map(|i| i + 1).unwrap_or_default();
+        (0..count).map(|i| {
+            RunTestListEvent::TestResult(ReproducibleTestResultData {
+                data: TestResultData {
+                    name: self.tests[start + i],
+                    result: TestResult {
+                        stdout: String::new(),
+                        variant: TestResultType::Missing,
+                    },
+                    start: OffsetDateTime::now_utc(),
+                    duration: Duration::new(0, 0),
+                    fail_dir: None,
+                },
+                run_list: &self.tests[..start + i + 1],
+                args: &self.options.args,
+            })
+        }).collect()
+    }
+
+    fn handle_test_start(&mut self, name: &str) -> Vec<RunTestListEvent<'a, 'list>> {
         trace!(self.logger, "Test started"; "test" => name);
         let next_test = self.last_finished.map(|i| i + 1).unwrap_or_default();
         if let Some(i) = (&self.tests[next_test..]).iter().position(|t| t == &name) {
-            self.skipped = i;
             self.cur_test = Some((next_test + i, OffsetDateTime::now_utc()));
+            self.get_missing(i)
         } else {
             warn!(self.logger, "Executing unknown test"; "test" => name);
+            Vec::new()
         }
     }
 
@@ -688,10 +693,9 @@ impl<'a, 'list, S: Stream<Item = DeqpEvent>> RunTestListState<'a, 'list, S> {
         result: Result<(), DeqpError>,
         stdout: String,
         stderr: String,
-    ) -> Option<RunTestListEvent<'a, 'list>> {
+    ) -> Vec<RunTestListEvent<'a, 'list>> {
         trace!(self.logger, "Finished"; "result" => ?result, "stdout" => &stdout,
             "stderr" => &stderr);
-        let run_list = self.tests;
         self.running = None;
         self.save_fail_dir_stderr(&stderr);
 
@@ -699,15 +703,15 @@ impl<'a, 'list, S: Stream<Item = DeqpEvent>> RunTestListState<'a, 'list, S> {
             if let Some(cur_test) = self.cur_test {
                 let duration = OffsetDateTime::now_utc() - cur_test.1;
                 if self.fail_dir.is_none() {
-                    self.create_fail_dir(run_list[cur_test.0]);
+                    self.create_fail_dir(self.tests[cur_test.0]);
                     self.save_fail_dir_stderr(&stderr);
                 }
 
                 // Continue testing
                 let run_list = &self.tests[..cur_test.0 + 1];
-                self.tests = &run_list[cur_test.0 + 1..];
+                self.tests = &self.tests[cur_test.0 + 1..];
 
-                return Some(RunTestListEvent::TestResult(ReproducibleTestResultData {
+                vec![RunTestListEvent::TestResult(ReproducibleTestResultData {
                     data: TestResultData {
                         name: run_list[cur_test.0],
                         result: TestResult {
@@ -724,38 +728,57 @@ impl<'a, 'list, S: Stream<Item = DeqpEvent>> RunTestListState<'a, 'list, S> {
                     },
                     run_list,
                     args: &self.options.args,
-                }));
+                })]
             } else if let Some(last_finished) = self.last_finished {
                 // No current test executed, so probably some tests are failing
                 // Mark rest of tests as missing
-                self.skipped = self.tests.len() - last_finished - 1;
+                let r = self.get_missing(self.tests.len() - last_finished - 1);
                 self.tests = &[];
+                r
             } else {
                 // No test executed or crashed in between tests, counts as fatal error
                 self.tests = &[];
                 warn!(self.logger, "Deqp exited without running tests, aborting"; "error" => ?e);
-                return Some(RunTestListEvent::DeqpError(DeqpErrorWithOutput {
+                vec![RunTestListEvent::DeqpError(DeqpErrorWithOutput {
                     error: DeqpError::FatalError,
                     stdout,
                     stderr,
-                }));
+                })]
             }
+        } else if let Some(cur_test) = self.cur_test {
+            let duration = OffsetDateTime::now_utc() - cur_test.1;
+            warn!(self.logger, "test not finished but deqp exited successful, count as failure";
+                "cur_test" => self.tests[cur_test.0], "started" => %cur_test.1);
+            let run_list = &self.tests[..cur_test.0 + 1];
+            self.tests = &self.tests[cur_test.0 + 1..];
+            debug!(self.logger, "LEFT OVER @@@@@@"; "tests" => ?self.tests);
+            vec![RunTestListEvent::TestResult(ReproducibleTestResultData {
+                data: TestResultData {
+                    name: run_list[cur_test.0],
+                    result: TestResult {
+                        stdout,
+                        variant: TestResultType::Crash,
+                    },
+                    start: cur_test.1,
+                    duration,
+                    fail_dir: self.fail_dir.clone(),
+                },
+                run_list,
+                args: &self.options.args,
+            })]
         } else {
-            if let Some(cur_test) = self.cur_test {
-                warn!(self.logger, "test not finished but deqp exited successful, ignoring";
-                    "cur_test" => self.tests[cur_test.0], "started" => %cur_test.1);
-            }
-            if let Some(last_finished) = self.last_finished {
+            let r = if let Some(last_finished) = self.last_finished {
                 // Mark rest of tests as missing
-                self.skipped = self.tests.len() - last_finished - 1;
-                self.tests = &[];
+                debug!(self.logger, "not all missing"; "tests" => ?self.tests, "last" => last_finished);
+                self.get_missing(self.tests.len() - last_finished - 1)
             } else {
                 // No test executed, counts all tests as missing
-                self.skipped = self.tests.len();
-                self.cur_test = Some((self.skipped, OffsetDateTime::now_utc()));
-            }
+                debug!(self.logger, "all missing"; "tests" => ?self.tests);
+                self.get_missing(self.tests.len())
+            };
+            self.tests = &[];
+            r
         }
-        None
     }
 }
 
@@ -976,9 +999,9 @@ pub fn run_deqp<S: AsRef<OsStr> + std::fmt::Debug>(
         }
     };
 
-    let state = RunDeqpState::new(logger, timeout_duration, child);
+    let mut state = RunDeqpState::new(logger, timeout_duration, child);
 
-    Box::pin(stream::unfold(state, |mut state| async {
+    Box::pin(gen!({
         // Continue reading stdout and stderr even when the process exited
         loop {
             if state.has_timeout {
@@ -987,14 +1010,11 @@ pub fn run_deqp<S: AsRef<OsStr> + std::fmt::Debug>(
                         if state.has_fatal_error {
                             result = Err(DeqpError::DeqpFatalError);
                         }
-                        return Some((
-                            DeqpEvent::Finished {
-                                result,
-                                stdout: mem::replace(&mut state.stdout, String::new()),
-                                stderr: mem::replace(&mut state.stderr, String::new()),
-                            },
-                            state,
-                        ));
+                        yield_!(DeqpEvent::Finished {
+                            result,
+                            stdout: mem::replace(&mut state.stdout, String::new()),
+                            stderr: mem::replace(&mut state.stderr, String::new()),
+                        });
                     }
                     None => {
                         // Kill deqp
@@ -1005,21 +1025,20 @@ pub fn run_deqp<S: AsRef<OsStr> + std::fmt::Debug>(
                                 error!(logger, "Failed to kill deqp after timeout"; "error" => %e);
                             }
                         });
-                        return None;
+                        return;
                     }
                 }
             }
 
-            tokio::select! {
+            if let Some(res) = tokio::select! {
                 // Stdout
                 l = state.stdout_reader.next_line(), if !state.stdout_finished => {
-                    if let Some(r) = state.handle_stdout_line(l) {
-                        return Some((r, state));
-                    }
+                    state.handle_stdout_line(l)
                 }
                 // Stderr
                 l = state.stderr_reader.next_line(), if !state.stderr_finished => {
                     state.handle_stderr_line(l);
+                    None
                 }
                 // Wait for process in parallel so it can make progress
                 r = state.child.wait(), if !state.finished => {
@@ -1029,11 +1048,13 @@ pub fn run_deqp<S: AsRef<OsStr> + std::fmt::Debug>(
                         Err(e) => Err(DeqpError::WaitFailed(e)),
                     });
                     state.finished = true;
+                    None
                 }
                 _ = &mut state.timeout, if !state.has_timeout && !state.finished => {
                     debug!(state.logger, "Detected timeout");
                     state.has_timeout = true;
                     state.finished_result = Some(Err(DeqpError::Timeout));
+                    None
                 }
                 // Return finished here as stdout and stderr are completely read
                 else => match state.finished_result.take() {
@@ -1041,14 +1062,16 @@ pub fn run_deqp<S: AsRef<OsStr> + std::fmt::Debug>(
                         if state.has_fatal_error {
                             result = Err(DeqpError::DeqpFatalError);
                         }
-                        return Some((DeqpEvent::Finished {
+                        Some(DeqpEvent::Finished {
                             result,
                             stdout: mem::replace(&mut state.stdout, String::new()),
                             stderr: mem::replace(&mut state.stderr, String::new()),
-                        }, state));
+                        })
                     }
-                    None => return None,
+                    None => return,
                 },
+            } {
+                yield_!(res);
             }
         }
     }))
@@ -1064,40 +1087,10 @@ pub fn run_test_list<'a, 'list>(
 ) -> impl Stream<Item = RunTestListEvent<'a, 'list>> + Send + Unpin {
     let mut state = RunTestListState::new(logger, tests, options);
 
-    stream::poll_fn(move |ctx| {
+    gen!({
         loop {
-            if state.skipped > 0 {
-                state.skipped -= 1;
-                let run_list = state.tests;
-
-                let skipped_test = if let Some(cur_test) = state.cur_test {
-                    cur_test.0 - state.skipped - 1
-                } else {
-                    if state.skipped == 0 {
-                        state.tests = &[];
-                    }
-                    state.tests.len() - state.skipped - 1
-                };
-
-                return Poll::Ready(Some(RunTestListEvent::TestResult(
-                    ReproducibleTestResultData {
-                        data: TestResultData {
-                            name: run_list[skipped_test],
-                            result: TestResult {
-                                stdout: String::new(),
-                                variant: TestResultType::Missing,
-                            },
-                            start: OffsetDateTime::now_utc(),
-                            duration: Duration::new(0, 0),
-                            fail_dir: None,
-                        },
-                        run_list: &run_list[..skipped_test + 1],
-                        args: &options.args,
-                    },
-                )));
-            }
-            if state.is_finished() {
-                return Poll::Ready(None);
+            if state.tests.is_empty() {
+                return;
             }
             if state.running.is_none() {
                 let args = match state.start() {
@@ -1105,20 +1098,24 @@ pub fn run_test_list<'a, 'list>(
                     Err(e) => {
                         // Cannot create test list, fatal error
                         state.tests = &[];
-                        return Poll::Ready(Some(RunTestListEvent::DeqpError(e)));
+                        yield_!(RunTestListEvent::DeqpError(e));
+                        return;
                     }
                 };
                 state.running = Some(run_deqp(state.logger.clone(), options.timeout, &args, &[]));
             }
 
-            match state.running.as_mut().unwrap().poll_next_unpin(ctx) {
-                Poll::Pending => return Poll::Pending,
-                Poll::Ready(None) => return Poll::Ready(None),
-                Poll::Ready(Some(e)) => match e {
-                    DeqpEvent::TestStart { name } => state.handle_test_start(&name),
+            match state.running.as_mut().unwrap().next().await {
+                None => return,
+                Some(e) => match e {
+                    DeqpEvent::TestStart { name } => {
+                        for r in state.handle_test_start(&name) {
+                            yield_!(r);
+                        }
+                    }
                     DeqpEvent::TestEnd { result } => {
                         if let Some(r) = state.handle_test_end(result) {
-                            return Poll::Ready(Some(r));
+                            yield_!(r);
                         }
                     }
                     DeqpEvent::Finished {
@@ -1126,8 +1123,8 @@ pub fn run_test_list<'a, 'list>(
                         stdout,
                         stderr,
                     } => {
-                        if let Some(r) = state.handle_finished(result, stdout, stderr) {
-                            return Poll::Ready(Some(r));
+                        for r in state.handle_finished(result, stdout, stderr) {
+                            yield_!(r);
                         }
                     }
                 },
@@ -1147,11 +1144,13 @@ pub fn write_summary<'a>(
         // Write summary
         let mut writer = csv::Writer::from_path(file).map_err(WriteSummaryError::OpenFile)?;
         for t in tests {
-            let r = summary.get(t).map(Cow::Borrowed).unwrap_or_else(|| Cow::Owned(SummaryEntry {
-                name: t,
-                result: TestResultType::NotRun,
-                run_id: None,
-            }));
+            let r = summary.get(t).map(Cow::Borrowed).unwrap_or_else(|| {
+                Cow::Owned(SummaryEntry {
+                    name: t,
+                    result: TestResultType::NotRun,
+                    run_id: None,
+                })
+            });
             writer.serialize(r).map_err(WriteSummaryError::WriteFile)?;
         }
     }
@@ -1285,5 +1284,241 @@ pub async fn run_tests_parallel<'a>(
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Mutex;
+
+    use anyhow::Result;
+    use slog::Drain;
+
+    use super::*;
+
+    fn create_logger() -> Logger {
+        let decorator = slog_term::PlainDecorator::new(slog_term::TestStdoutWriter);
+        let drain = Mutex::new(slog_term::FullFormat::new(decorator).build()).fuse();
+
+        slog::Logger::root(drain, o!())
+    }
+
+    async fn check_tests(args: &[&str], expected: &[(&str, TestResultType)]) -> Result<()> {
+        let logger = create_logger();
+        let run_options = RunOptions {
+            args: args.iter().map(|s| s.to_string()).collect(),
+            capture_dumps: true,
+            timeout: std::time::Duration::from_secs(5),
+            fail_dir: None,
+        };
+
+        // Read test file
+        let test_file = tokio::fs::read_to_string("logs/in").await?;
+        let tests = parse_test_file(&test_file);
+        assert_eq!(tests.len(), 18, "Test size does not match");
+
+        let mut summary = HashMap::new();
+        run_tests_parallel(
+            &logger,
+            &tests,
+            &mut summary,
+            &run_options,
+            None,
+            num_cpus::get(),
+            None,
+        )
+        .await;
+
+        assert_eq!(
+            summary.len(),
+            expected.len(),
+            "Result length does not match"
+        );
+        for (t, r) in expected {
+            if let Some(r2) = summary.get(t) {
+                assert_eq!(r2.result, *r, "Test result does not match for test {}", t);
+            } else {
+                panic!("Test {} has no result but expected {:?}", t, r);
+            }
+        }
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_a() -> Result<()> {
+        let expected = vec![
+            ("dEQP-VK.tessellation.primitive_discard.triangles_equal_spacing_ccw", TestResultType::Pass),
+            ("dEQP-VK.tessellation.primitive_discard.triangles_equal_spacing_ccw_point_mode", TestResultType::Pass),
+            ("dEQP-VK.tessellation.primitive_discard.triangles_equal_spacing_cw", TestResultType::Pass),
+            ("dEQP-VK.tessellation.primitive_discard.triangles_equal_spacing_cw_point_mode", TestResultType::Pass),
+            ("dEQP-VK.tessellation.primitive_discard.triangles_fractional_odd_spacing_ccw_valid_levels", TestResultType::Pass),
+            ("dEQP-VK.tessellation.primitive_discard.triangles_fractional_odd_spacing_ccw", TestResultType::Pass),
+            ("dEQP-VK.tessellation.primitive_discard.triangles_fractional_odd_spacing_ccw_point_mode_valid_levels", TestResultType::Pass),
+            ("dEQP-VK.tessellation.primitive_discard.triangles_fractional_odd_spacing_ccw_point_mode", TestResultType::Pass),
+            ("dEQP-VK.tessellation.primitive_discard.triangles_fractional_odd_spacing_cw_valid_levels", TestResultType::Pass),
+            ("dEQP-VK.tessellation.primitive_discard.triangles_fractional_odd_spacing_cw", TestResultType::Pass),
+            ("dEQP-VK.tessellation.primitive_discard.triangles_fractional_odd_spacing_cw_point_mode_valid_levels", TestResultType::Pass),
+            ("dEQP-VK.tessellation.primitive_discard.triangles_fractional_odd_spacing_cw_point_mode", TestResultType::Pass),
+            ("dEQP-VK.tessellation.primitive_discard.triangles_fractional_even_spacing_ccw", TestResultType::Pass),
+            ("dEQP-VK.tessellation.primitive_discard.triangles_fractional_even_spacing_ccw_point_mode", TestResultType::Pass),
+            ("dEQP-VK.tessellation.primitive_discard.triangles_fractional_even_spacing_cw", TestResultType::Pass),
+            ("dEQP-VK.tessellation.primitive_discard.triangles_fractional_even_spacing_cw_point_mode", TestResultType::Pass),
+            ("dEQP-VK.fragment_shader_interlock.basic.discard.ssbo.shading_rate_unordered.4xaa.sample_shading.512x512", TestResultType::NotSupported),
+            ("dEQP-VK.fragment_shader_interlock.basic.discard.ssbo.shading_rate_unordered.4xaa.sample_shading.1024x1024", TestResultType::NotSupported),
+        ];
+
+        check_tests(
+            &["test/test-runner.sh", "logs/a", "/dev/null", "0"],
+            &expected,
+        )
+        .await?;
+
+        check_tests(
+            &["test/test-runner.sh", "logs/c", "logs/c-err", "1"],
+            &expected,
+        )
+        .await?;
+
+        //write_summary(&tests, &summary, Some(&options.csv_summary), Some(&options.xml_summary))?;
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_b() -> Result<()> {
+        check_tests(
+            &["test/test-runner.sh", "logs/b", "logs/b-err", "1"],
+            &[],
+        )
+        .await?;
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_d() -> Result<()> {
+        let expected = vec![
+            ("dEQP-VK.tessellation.primitive_discard.triangles_equal_spacing_ccw", TestResultType::Pass),
+            ("dEQP-VK.tessellation.primitive_discard.triangles_equal_spacing_ccw_point_mode", TestResultType::Pass),
+            ("dEQP-VK.tessellation.primitive_discard.triangles_equal_spacing_cw", TestResultType::Pass),
+            ("dEQP-VK.tessellation.primitive_discard.triangles_equal_spacing_cw_point_mode", TestResultType::Pass),
+            ("dEQP-VK.tessellation.primitive_discard.triangles_fractional_odd_spacing_ccw_valid_levels", TestResultType::Pass),
+            ("dEQP-VK.tessellation.primitive_discard.triangles_fractional_odd_spacing_ccw", TestResultType::Pass),
+            ("dEQP-VK.tessellation.primitive_discard.triangles_fractional_odd_spacing_ccw_point_mode_valid_levels", TestResultType::Pass),
+            ("dEQP-VK.tessellation.primitive_discard.triangles_fractional_odd_spacing_ccw_point_mode", TestResultType::Pass),
+            ("dEQP-VK.tessellation.primitive_discard.triangles_fractional_odd_spacing_cw_valid_levels", TestResultType::Pass),
+            ("dEQP-VK.tessellation.primitive_discard.triangles_fractional_odd_spacing_cw", TestResultType::Pass),
+            ("dEQP-VK.tessellation.primitive_discard.triangles_fractional_odd_spacing_cw_point_mode_valid_levels", TestResultType::Pass),
+            ("dEQP-VK.tessellation.primitive_discard.triangles_fractional_odd_spacing_cw_point_mode", TestResultType::Pass),
+            ("dEQP-VK.tessellation.primitive_discard.triangles_fractional_even_spacing_ccw", TestResultType::Pass),
+            ("dEQP-VK.tessellation.primitive_discard.triangles_fractional_even_spacing_ccw_point_mode", TestResultType::Pass),
+            ("dEQP-VK.tessellation.primitive_discard.triangles_fractional_even_spacing_cw", TestResultType::Pass),
+            ("dEQP-VK.tessellation.primitive_discard.triangles_fractional_even_spacing_cw_point_mode", TestResultType::Crash),
+            ("dEQP-VK.fragment_shader_interlock.basic.discard.ssbo.shading_rate_unordered.4xaa.sample_shading.512x512", TestResultType::Missing),
+            ("dEQP-VK.fragment_shader_interlock.basic.discard.ssbo.shading_rate_unordered.4xaa.sample_shading.1024x1024", TestResultType::Missing),
+        ];
+
+        check_tests(
+            &["test/test-runner.sh", "logs/d", "/dev/null", "0"],
+            &expected,
+        )
+        .await?;
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_d_fatal() -> Result<()> {
+        let expected = vec![
+            ("dEQP-VK.tessellation.primitive_discard.triangles_equal_spacing_ccw", TestResultType::Pass),
+            ("dEQP-VK.tessellation.primitive_discard.triangles_equal_spacing_ccw_point_mode", TestResultType::Pass),
+            ("dEQP-VK.tessellation.primitive_discard.triangles_equal_spacing_cw", TestResultType::Pass),
+            ("dEQP-VK.tessellation.primitive_discard.triangles_equal_spacing_cw_point_mode", TestResultType::Pass),
+            ("dEQP-VK.tessellation.primitive_discard.triangles_fractional_odd_spacing_ccw_valid_levels", TestResultType::Pass),
+            ("dEQP-VK.tessellation.primitive_discard.triangles_fractional_odd_spacing_ccw", TestResultType::Pass),
+            ("dEQP-VK.tessellation.primitive_discard.triangles_fractional_odd_spacing_ccw_point_mode_valid_levels", TestResultType::Pass),
+            ("dEQP-VK.tessellation.primitive_discard.triangles_fractional_odd_spacing_ccw_point_mode", TestResultType::Pass),
+            ("dEQP-VK.tessellation.primitive_discard.triangles_fractional_odd_spacing_cw_valid_levels", TestResultType::Pass),
+            ("dEQP-VK.tessellation.primitive_discard.triangles_fractional_odd_spacing_cw", TestResultType::Pass),
+            ("dEQP-VK.tessellation.primitive_discard.triangles_fractional_odd_spacing_cw_point_mode_valid_levels", TestResultType::Pass),
+            ("dEQP-VK.tessellation.primitive_discard.triangles_fractional_odd_spacing_cw_point_mode", TestResultType::Pass),
+            ("dEQP-VK.tessellation.primitive_discard.triangles_fractional_even_spacing_ccw", TestResultType::Pass),
+            ("dEQP-VK.tessellation.primitive_discard.triangles_fractional_even_spacing_ccw_point_mode", TestResultType::Pass),
+            ("dEQP-VK.tessellation.primitive_discard.triangles_fractional_even_spacing_cw", TestResultType::Pass),
+            ("dEQP-VK.tessellation.primitive_discard.triangles_fractional_even_spacing_cw_point_mode", TestResultType::Crash),
+        ];
+
+        check_tests(
+            &["test/test-runner.sh", "logs/d", "logs/d-err", "1"],
+            &expected,
+        )
+        .await?;
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_timeout() -> Result<()> {
+        let expected = vec![
+            ("dEQP-VK.tessellation.primitive_discard.triangles_equal_spacing_ccw", TestResultType::Pass),
+            ("dEQP-VK.tessellation.primitive_discard.triangles_equal_spacing_ccw_point_mode", TestResultType::Pass),
+            ("dEQP-VK.tessellation.primitive_discard.triangles_equal_spacing_cw", TestResultType::Pass),
+            ("dEQP-VK.tessellation.primitive_discard.triangles_equal_spacing_cw_point_mode", TestResultType::Pass),
+            ("dEQP-VK.tessellation.primitive_discard.triangles_fractional_odd_spacing_ccw_valid_levels", TestResultType::Pass),
+            ("dEQP-VK.tessellation.primitive_discard.triangles_fractional_odd_spacing_ccw", TestResultType::Pass),
+            ("dEQP-VK.tessellation.primitive_discard.triangles_fractional_odd_spacing_ccw_point_mode_valid_levels", TestResultType::Pass),
+            ("dEQP-VK.tessellation.primitive_discard.triangles_fractional_odd_spacing_ccw_point_mode", TestResultType::Pass),
+            ("dEQP-VK.tessellation.primitive_discard.triangles_fractional_odd_spacing_cw_valid_levels", TestResultType::Pass),
+            ("dEQP-VK.tessellation.primitive_discard.triangles_fractional_odd_spacing_cw", TestResultType::Pass),
+            ("dEQP-VK.tessellation.primitive_discard.triangles_fractional_odd_spacing_cw_point_mode_valid_levels", TestResultType::Pass),
+            ("dEQP-VK.tessellation.primitive_discard.triangles_fractional_odd_spacing_cw_point_mode", TestResultType::Pass),
+            ("dEQP-VK.tessellation.primitive_discard.triangles_fractional_even_spacing_ccw", TestResultType::Pass),
+            ("dEQP-VK.tessellation.primitive_discard.triangles_fractional_even_spacing_ccw_point_mode", TestResultType::Pass),
+            ("dEQP-VK.tessellation.primitive_discard.triangles_fractional_even_spacing_cw", TestResultType::Pass),
+            ("dEQP-VK.tessellation.primitive_discard.triangles_fractional_even_spacing_cw_point_mode", TestResultType::Timeout),
+        ];
+
+        check_tests(
+            &["test/test-timeout.sh", "logs/d", "/dev/null", "1"],
+            &expected,
+        )
+        .await?;
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_bisect() -> Result<()> {
+        let expected = vec![
+            ("dEQP-VK.tessellation.primitive_discard.triangles_equal_spacing_ccw", TestResultType::Pass),
+            ("dEQP-VK.tessellation.primitive_discard.triangles_equal_spacing_ccw_point_mode", TestResultType::Pass),
+            ("dEQP-VK.tessellation.primitive_discard.triangles_equal_spacing_cw", TestResultType::Pass),
+            ("dEQP-VK.tessellation.primitive_discard.triangles_equal_spacing_cw_point_mode", TestResultType::Pass),
+            ("dEQP-VK.tessellation.primitive_discard.triangles_fractional_odd_spacing_ccw_valid_levels", TestResultType::Pass),
+            ("dEQP-VK.tessellation.primitive_discard.triangles_fractional_odd_spacing_ccw", TestResultType::Pass),
+            ("dEQP-VK.tessellation.primitive_discard.triangles_fractional_odd_spacing_ccw_point_mode_valid_levels", TestResultType::Pass),
+            ("dEQP-VK.tessellation.primitive_discard.triangles_fractional_odd_spacing_ccw_point_mode", TestResultType::Pass),
+            ("dEQP-VK.tessellation.primitive_discard.triangles_fractional_odd_spacing_cw_valid_levels", TestResultType::Pass),
+            ("dEQP-VK.tessellation.primitive_discard.triangles_fractional_odd_spacing_cw", TestResultType::Pass),
+            ("dEQP-VK.tessellation.primitive_discard.triangles_fractional_odd_spacing_cw_point_mode_valid_levels", TestResultType::Pass),
+            ("dEQP-VK.tessellation.primitive_discard.triangles_fractional_odd_spacing_cw_point_mode", TestResultType::Pass),
+            ("dEQP-VK.tessellation.primitive_discard.triangles_fractional_even_spacing_ccw", TestResultType::Pass),
+            ("dEQP-VK.tessellation.primitive_discard.triangles_fractional_even_spacing_ccw_point_mode", TestResultType::Pass),
+            ("dEQP-VK.tessellation.primitive_discard.triangles_fractional_even_spacing_cw", TestResultType::Pass),
+            ("dEQP-VK.tessellation.primitive_discard.triangles_fractional_even_spacing_cw_point_mode", TestResultType::Crash),
+            ("dEQP-VK.fragment_shader_interlock.basic.discard.ssbo.shading_rate_unordered.4xaa.sample_shading.512x512", TestResultType::NotSupported),
+            ("dEQP-VK.fragment_shader_interlock.basic.discard.ssbo.shading_rate_unordered.4xaa.sample_shading.1024x1024", TestResultType::NotSupported),
+        ];
+
+        // TODO Check bisection result
+
+        check_tests(
+            &["test/bisect-test-runner.sh", "dEQP-VK.tessellation.primitive_discard.triangles_fractional_odd_spacing_ccw_valid_levels", "logs/d", "/dev/null", "1", "logs/a", "dev/null", "0"],
+            &expected,
+        )
+        .await?;
+
+        Ok(())
     }
 }
