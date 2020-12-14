@@ -1,5 +1,3 @@
-use std::collections::HashMap;
-
 use anyhow::Result;
 use clap::Clap;
 use deqp_runner::*;
@@ -18,13 +16,19 @@ async fn main() -> Result<()> {
 async fn real_main() -> Result<()> {
     let mut options: Options = Options::parse();
 
-    let does_log = std::env::var("RUST_LOG").is_ok();
-    // We can have either logging or a progress bar, choose logging by default
-    if !does_log && !options.progress {
+    if std::env::var("RUST_LOG").is_err() {
         std::env::set_var("RUST_LOG", "info");
     }
 
-    let logger = {
+    let logger = if !options.no_progress {
+        let drain = slog_term::FullFormat::new(deqp_runner::slog_pg::ProgressBarDecorator)
+            .build()
+            .fuse();
+        let drain = slog_envlogger::new(drain).fuse();
+        let drain = slog_async::Async::new(drain).build().fuse();
+
+        slog::Logger::root(drain, o!())
+    } else {
         let decorator = slog_term::TermDecorator::new().build();
         let drain = slog_term::CompactFormat::new(decorator).build().fuse();
         let drain = slog_envlogger::new(drain).fuse();
@@ -67,14 +71,14 @@ async fn real_main() -> Result<()> {
         fail_dir: Some(options.failures),
     };
 
-    let progress_bar = if !does_log && options.progress {
-        Some(indicatif::ProgressBar::new(1))
+    let progress_bar = if !options.no_progress {
+        Some(&*PROGRESS_BAR)
     } else {
         None
     };
 
     let job_count = options.jobs.unwrap_or_else(num_cpus::get);
-    let mut summary = HashMap::new();
+    let mut summary = Summary::default();
     tokio::select! {
         _ = run_tests_parallel(
             &logger,
@@ -83,14 +87,21 @@ async fn real_main() -> Result<()> {
             &run_options,
             Some(&options.log),
             job_count,
-            progress_bar.as_ref(),
+            progress_bar,
         ) => {}
         _ = tokio::signal::ctrl_c() => {
             info!(logger, "Killed by sigint");
         }
     }
 
-    write_summary(&tests, &summary, Some(&options.csv_summary), Some(&options.xml_summary))?;
+    summary::write_summary(
+        &logger,
+        &tests,
+        &summary,
+        run_options.fail_dir.as_deref(),
+        Some(&options.csv_summary),
+        Some(&options.xml_summary),
+    )?;
 
     Ok(())
 }

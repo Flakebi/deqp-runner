@@ -24,8 +24,17 @@ use tokio::prelude::*;
 use tokio::process::{Child, ChildStderr, ChildStdout, Command};
 use tokio::time::Sleep;
 
+pub mod slog_pg;
+pub mod summary;
+
+pub use summary::Summary;
+
 /// This many tests will be executed with a single deqp run.
 const BATCH_SIZE: usize = 1000;
+/// Name of the file where stderr is saved.
+const STDERR_FILE: &str = "stderr.txt";
+/// These many lines from stderr will be saved in the junit xml result file.
+const LAST_STDERR_LINES: usize = 5;
 
 static RESULT_VARIANTS: Lazy<HashMap<&str, TestResultType>> = Lazy::new(|| {
     let mut result_variants = HashMap::new();
@@ -36,6 +45,15 @@ static RESULT_VARIANTS: Lazy<HashMap<&str, TestResultType>> = Lazy::new(|| {
     result_variants.insert("Fail", TestResultType::Fail);
     result_variants.insert("InternalError", TestResultType::InternalError);
     result_variants
+});
+
+pub static PROGRESS_BAR: Lazy<ProgressBar> = Lazy::new(|| {
+    let bar = ProgressBar::new(1);
+    bar.set_style(
+        indicatif::ProgressStyle::default_bar().template("{wide_bar} job {pos}/{len}{msg} ({eta})"),
+    );
+    bar.enable_steady_tick(1000);
+    bar
 });
 
 #[derive(Clone, Debug)]
@@ -51,9 +69,9 @@ pub struct Options {
     /// This can uncover bugs that are not detected normally.
     #[cfg_attr(feature = "bin", clap(long))]
     pub shuffle: bool,
-    /// Show progress bar.
-    #[cfg_attr(feature = "bin", clap(short, long))]
-    pub progress: bool,
+    /// Hide progress bar.
+    #[cfg_attr(feature = "bin", clap(short = 'p', long))]
+    pub no_progress: bool,
     /// Start of test range from test list.
     #[cfg_attr(feature = "bin", clap(long))]
     pub start: Option<usize>,
@@ -116,13 +134,13 @@ pub enum TestResultType {
     Flake(Box<TestResultType>),
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct TestResult {
     pub stdout: String,
     pub variant: TestResultType,
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct TestResultData<'a> {
     /// Name of the deqp test.
     pub name: &'a str,
@@ -212,18 +230,6 @@ pub enum RunTestListEvent<'a, 'list> {
     DeqpError(DeqpErrorWithOutput),
 }
 
-/// Lines of the `summary.csv` file.
-#[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct SummaryEntry<'a> {
-    /// Name of the deqp test.
-    pub name: &'a str,
-    pub result: TestResultType,
-    /// Reference into the run log.
-    ///
-    /// References a [`TestResultEntry`], the reference is `None` if the test was not executed.
-    pub run_id: Option<u64>,
-}
-
 /// Struct for the `run_log.json` file. Every line in this file is such an entry.
 #[derive(Debug, Deserialize, Serialize)]
 pub enum RunLogEntry<'a> {
@@ -308,15 +314,6 @@ struct RunTestListState<'a, 'list, S: Stream<Item = DeqpEvent>> {
     /// If the current run had a failure and we already created a failure dir, this is the
     /// directory.
     fail_dir: Option<String>,
-}
-
-/// Failure when writing the summary file
-#[derive(Debug, Error)]
-pub enum WriteSummaryError {
-    #[error("Failed to write summary file: {0}")]
-    WriteFile(#[source] csv::Error),
-    #[error("Failed to open summary file: {0}")]
-    OpenFile(#[source] csv::Error),
 }
 
 mod serde_io_error {
@@ -611,7 +608,7 @@ impl<'a, 'list, S: Stream<Item = DeqpEvent>> RunTestListState<'a, 'list, S> {
         if let Some(dir_name) = &self.fail_dir {
             let fail_dir = self.options.fail_dir.as_ref().unwrap().join(dir_name);
             // Save stderr
-            match std::fs::File::create(fail_dir.join("stderr.txt")) {
+            match std::fs::File::create(fail_dir.join(STDERR_FILE)) {
                 Ok(mut f) => {
                     if let Err(e) = f.write_all(stderr.as_bytes()) {
                         error!(self.logger, "Failed to write stderr file"; "error" => %e);
@@ -626,22 +623,24 @@ impl<'a, 'list, S: Stream<Item = DeqpEvent>> RunTestListState<'a, 'list, S> {
 
     fn get_missing(&self, count: usize) -> Vec<RunTestListEvent<'a, 'list>> {
         let start = self.last_finished.map(|i| i + 1).unwrap_or_default();
-        (0..count).map(|i| {
-            RunTestListEvent::TestResult(ReproducibleTestResultData {
-                data: TestResultData {
-                    name: self.tests[start + i],
-                    result: TestResult {
-                        stdout: String::new(),
-                        variant: TestResultType::Missing,
+        (0..count)
+            .map(|i| {
+                RunTestListEvent::TestResult(ReproducibleTestResultData {
+                    data: TestResultData {
+                        name: self.tests[start + i],
+                        result: TestResult {
+                            stdout: String::new(),
+                            variant: TestResultType::Missing,
+                        },
+                        start: OffsetDateTime::now_utc(),
+                        duration: Duration::new(0, 0),
+                        fail_dir: None,
                     },
-                    start: OffsetDateTime::now_utc(),
-                    duration: Duration::new(0, 0),
-                    fail_dir: None,
-                },
-                run_list: &self.tests[..start + i + 1],
-                args: &self.options.args,
+                    run_list: &self.tests[..start + i + 1],
+                    args: &self.options.args,
+                })
             })
-        }).collect()
+            .collect()
     }
 
     fn handle_test_start(&mut self, name: &str) -> Vec<RunTestListEvent<'a, 'list>> {
@@ -699,37 +698,42 @@ impl<'a, 'list, S: Stream<Item = DeqpEvent>> RunTestListState<'a, 'list, S> {
         self.running = None;
         self.save_fail_dir_stderr(&stderr);
 
-        if let Err(e) = result {
-            if let Some(cur_test) = self.cur_test {
-                let duration = OffsetDateTime::now_utc() - cur_test.1;
-                if self.fail_dir.is_none() {
-                    self.create_fail_dir(self.tests[cur_test.0]);
-                    self.save_fail_dir_stderr(&stderr);
-                }
+        if let Some(cur_test) = self.cur_test {
+            let duration = OffsetDateTime::now_utc() - cur_test.1;
+            if self.fail_dir.is_none() {
+                self.create_fail_dir(self.tests[cur_test.0]);
+                self.save_fail_dir_stderr(&stderr);
+            }
 
-                // Continue testing
-                let run_list = &self.tests[..cur_test.0 + 1];
-                self.tests = &self.tests[cur_test.0 + 1..];
+            if result.is_ok() {
+                warn!(self.logger, "test not finished but deqp exited successful, count as failure";
+                    "cur_test" => self.tests[cur_test.0], "started" => %cur_test.1);
+            }
 
-                vec![RunTestListEvent::TestResult(ReproducibleTestResultData {
-                    data: TestResultData {
-                        name: run_list[cur_test.0],
-                        result: TestResult {
-                            stdout,
-                            variant: if matches!(e, DeqpError::Timeout) {
-                                TestResultType::Timeout
-                            } else {
-                                TestResultType::Crash
-                            },
+            // Continue testing
+            let run_list = &self.tests[..cur_test.0 + 1];
+            self.tests = &self.tests[cur_test.0 + 1..];
+
+            vec![RunTestListEvent::TestResult(ReproducibleTestResultData {
+                data: TestResultData {
+                    name: run_list[cur_test.0],
+                    result: TestResult {
+                        stdout,
+                        variant: if matches!(result, Err(DeqpError::Timeout)) {
+                            TestResultType::Timeout
+                        } else {
+                            TestResultType::Crash
                         },
-                        start: cur_test.1,
-                        duration,
-                        fail_dir: self.fail_dir.clone(),
                     },
-                    run_list,
-                    args: &self.options.args,
-                })]
-            } else if let Some(last_finished) = self.last_finished {
+                    start: cur_test.1,
+                    duration,
+                    fail_dir: self.fail_dir.clone(),
+                },
+                run_list,
+                args: &self.options.args,
+            })]
+        } else if let Err(e) = result {
+            if let Some(last_finished) = self.last_finished {
                 // No current test executed, so probably some tests are failing
                 // Mark rest of tests as missing
                 let r = self.get_missing(self.tests.len() - last_finished - 1);
@@ -745,27 +749,6 @@ impl<'a, 'list, S: Stream<Item = DeqpEvent>> RunTestListState<'a, 'list, S> {
                     stderr,
                 })]
             }
-        } else if let Some(cur_test) = self.cur_test {
-            let duration = OffsetDateTime::now_utc() - cur_test.1;
-            warn!(self.logger, "test not finished but deqp exited successful, count as failure";
-                "cur_test" => self.tests[cur_test.0], "started" => %cur_test.1);
-            let run_list = &self.tests[..cur_test.0 + 1];
-            self.tests = &self.tests[cur_test.0 + 1..];
-            debug!(self.logger, "LEFT OVER @@@@@@"; "tests" => ?self.tests);
-            vec![RunTestListEvent::TestResult(ReproducibleTestResultData {
-                data: TestResultData {
-                    name: run_list[cur_test.0],
-                    result: TestResult {
-                        stdout,
-                        variant: TestResultType::Crash,
-                    },
-                    start: cur_test.1,
-                    duration,
-                    fail_dir: self.fail_dir.clone(),
-                },
-                run_list,
-                args: &self.options.args,
-            })]
         } else {
             let r = if let Some(last_finished) = self.last_finished {
                 // Mark rest of tests as missing
@@ -1133,39 +1116,11 @@ pub fn run_test_list<'a, 'list>(
     })
 }
 
-/// Write summary csv and xml file.
-pub fn write_summary<'a>(
-    tests: &[&'a str],
-    summary: &HashMap<&'a str, SummaryEntry>,
-    csv_file: Option<&Path>,
-    xml_file: Option<&Path>,
-) -> Result<(), WriteSummaryError> {
-    if let Some(file) = csv_file {
-        // Write summary
-        let mut writer = csv::Writer::from_path(file).map_err(WriteSummaryError::OpenFile)?;
-        for t in tests {
-            let r = summary.get(t).map(Cow::Borrowed).unwrap_or_else(|| {
-                Cow::Owned(SummaryEntry {
-                    name: t,
-                    result: TestResultType::NotRun,
-                    run_id: None,
-                })
-            });
-            writer.serialize(r).map_err(WriteSummaryError::WriteFile)?;
-        }
-    }
-    // TODO Write xml
-    if let Some(_file) = xml_file {
-        // Write only failures
-    }
-    Ok(())
-}
-
 pub async fn run_tests_parallel<'a>(
     logger: &'a Logger,
     tests: &'a [&'a str],
     // Map test names to summary entries
-    summary: &mut HashMap<&'a str, SummaryEntry<'a>>,
+    summary: &mut Summary<'a>,
     options: &'a RunOptions,
     log_file: Option<&'a Path>,
     job_count: usize,
@@ -1183,8 +1138,10 @@ pub async fn run_tests_parallel<'a>(
     let mut log_entry_id: u64 = 0;
     if let Some(pb) = progress_bar {
         pb.set_length(pending_jobs.len() as u64);
-        pb.set_prefix("Test job");
     }
+
+    let mut fails = 0;
+    let mut crashes = 0;
 
     let mut log = if let Some(log_file) = log_file {
         match std::fs::File::create(log_file) {
@@ -1227,25 +1184,50 @@ pub async fn run_tests_parallel<'a>(
                             RunLogEntry::TestResult(res) => {
                                 res.id = log_entry_id;
                                 log_entry_id += 1;
-                                match summary.entry(res.data.name) {
+                                match summary.0.entry(res.data.name) {
                                     Entry::Occupied(mut entry) => {
-                                        let old_id = entry.get().run_id;
+                                        let old_id = entry.get().0.run_id;
                                         // Merge result variants
-                                        let old = entry.get().result.clone();
+                                        let old = entry.get().0.result.clone();
                                         let new = res.data.result.variant.clone();
                                         let (result, take_new) = old.merge(new);
-                                        entry.insert(SummaryEntry {
+                                        entry.get_mut().0 = summary::SummaryEntry {
                                             name: res.data.name,
                                             result,
                                             run_id: if take_new { Some(res.id) } else { old_id },
-                                        });
+                                        };
+                                        if take_new {
+                                            entry.get_mut().1 = Some(res.data.clone());
+                                        }
                                     }
                                     Entry::Vacant(entry) => {
-                                        entry.insert(SummaryEntry {
-                                            name: res.data.name,
-                                            result: res.data.result.variant.clone(),
-                                            run_id: Some(res.id),
-                                        });
+                                        if res.data.result.variant.is_failure() {
+                                            if res.data.result.variant == TestResultType::Crash {
+                                                crashes += 1;
+                                            } else {
+                                                fails += 1;
+                                            }
+                                            if let Some(pb) = progress_bar {
+                                                pb.println(format!(
+                                                    "{}: {:?}",
+                                                    res.data.name, res.data.result.variant
+                                                ));
+                                                // Show fails and crashes on progress bar
+                                                pb.set_message(&format!(
+                                                    "; fails: {}, crashes: {}",
+                                                    fails, crashes
+                                                ));
+                                                pb.tick();
+                                            }
+                                        }
+                                        entry.insert((
+                                            summary::SummaryEntry {
+                                                name: res.data.name,
+                                                result: res.data.result.variant.clone(),
+                                                run_id: Some(res.id),
+                                            },
+                                            Some(res.data.clone()),
+                                        ));
                                     }
                                 }
                             }
@@ -1285,6 +1267,10 @@ pub async fn run_tests_parallel<'a>(
             }
         }
     }
+
+    if let Some(pb) = progress_bar {
+        pb.finish_and_clear();
+    }
 }
 
 #[cfg(test)]
@@ -1304,11 +1290,19 @@ mod tests {
     }
 
     async fn check_tests(args: &[&str], expected: &[(&str, TestResultType)]) -> Result<()> {
+        check_tests_with_summary(args, expected, |_| {}).await
+    }
+
+    async fn check_tests_with_summary<F: for<'a> FnOnce(Summary<'a>)>(
+        args: &[&str],
+        expected: &[(&str, TestResultType)],
+        check: F,
+    ) -> Result<()> {
         let logger = create_logger();
         let run_options = RunOptions {
             args: args.iter().map(|s| s.to_string()).collect(),
             capture_dumps: true,
-            timeout: std::time::Duration::from_secs(5),
+            timeout: std::time::Duration::from_secs(2),
             fail_dir: None,
         };
 
@@ -1317,7 +1311,7 @@ mod tests {
         let tests = parse_test_file(&test_file);
         assert_eq!(tests.len(), 18, "Test size does not match");
 
-        let mut summary = HashMap::new();
+        let mut summary = Summary::default();
         run_tests_parallel(
             &logger,
             &tests,
@@ -1330,17 +1324,19 @@ mod tests {
         .await;
 
         assert_eq!(
-            summary.len(),
+            summary.0.len(),
             expected.len(),
             "Result length does not match"
         );
         for (t, r) in expected {
-            if let Some(r2) = summary.get(t) {
-                assert_eq!(r2.result, *r, "Test result does not match for test {}", t);
+            if let Some(r2) = summary.0.get(t) {
+                assert_eq!(r2.0.result, *r, "Test result does not match for test {}", t);
             } else {
                 panic!("Test {} has no result but expected {:?}", t, r);
             }
         }
+
+        check(summary);
 
         Ok(())
     }
@@ -1387,11 +1383,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_b() -> Result<()> {
-        check_tests(
-            &["test/test-runner.sh", "logs/b", "logs/b-err", "1"],
-            &[],
-        )
-        .await?;
+        check_tests(&["test/test-runner.sh", "logs/b", "logs/b-err", "1"], &[]).await?;
 
         Ok(())
     }
@@ -1511,11 +1503,15 @@ mod tests {
             ("dEQP-VK.fragment_shader_interlock.basic.discard.ssbo.shading_rate_unordered.4xaa.sample_shading.1024x1024", TestResultType::NotSupported),
         ];
 
-        // TODO Check bisection result
-
-        check_tests(
+        check_tests_with_summary(
             &["test/bisect-test-runner.sh", "dEQP-VK.tessellation.primitive_discard.triangles_fractional_odd_spacing_ccw_valid_levels", "logs/d", "/dev/null", "1", "logs/a", "dev/null", "0"],
             &expected,
+            |summary| {
+                // TODO Check bisection result with get_test_results returned by check_tests
+                let res = summary.0.get("dEQP-VK.tessellation.primitive_discard.triangles_fractional_even_spacing_cw_point_mode").unwrap();
+                assert_eq!(res.1.as_ref().unwrap().fail_dir, None);
+                assert_eq!(res.0.run_id, Some(25));
+            }
         )
         .await?;
 
