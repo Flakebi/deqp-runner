@@ -104,7 +104,7 @@ pub struct Options {
     /// Timout for a single test in seconds.
     ///
     /// A test that runs this long is considered failing.
-    #[cfg_attr(feature = "bin", clap(long, default_value = "60"))]
+    #[cfg_attr(feature = "bin", clap(long, default_value = "600"))]
     pub timeout: u32,
     /// The deqp command to run. E.g. `./deqp-vk --deqp-caselist-file`
     ///
@@ -470,6 +470,7 @@ impl RunDeqpState {
         };
         if let Some(l) = l {
             if l.contains("FATAL ERROR: ") {
+                warn!(self.logger, "Deqp encountered fatal error"; "error" => &l);
                 self.has_fatal_error = true;
             }
             self.stderr.push_str(&l);

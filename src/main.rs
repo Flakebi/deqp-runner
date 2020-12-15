@@ -20,6 +20,10 @@ async fn real_main() -> Result<()> {
         std::env::set_var("RUST_LOG", "info");
     }
 
+    if PROGRESS_BAR.is_hidden() {
+        options.no_progress = true;
+    }
+
     let logger = if !options.no_progress {
         let drain = slog_term::FullFormat::new(deqp_runner::slog_pg::ProgressBarDecorator)
             .build()

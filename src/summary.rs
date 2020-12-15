@@ -74,89 +74,101 @@ pub fn write_summary<'a>(
         use junit_report::TestCase;
 
         // Write only failures
-        let ts = junit_report::TestSuite::new("CTS").add_testcases(tests.iter().filter_map(|t| {
-            if let Some(entry) = summary.0.get(t) {
-                if entry.0.result.is_failure() || matches!(entry.0.result, TestResultType::Flake(_))
-                {
-                    // Count flakes as success but report anyway
-                    if let Some(run) = &entry.1 {
-                        let mut test = if let TestResultType::Flake(res) = &entry.0.result {
-                            TestCase::success(
-                                t,
-                                junit_report::Duration::from_std(run.duration.try_into().unwrap())
+        let mut has_not_run = 0;
+        let mut ts =
+            junit_report::TestSuite::new("CTS").add_testcases(tests.iter().filter_map(|t| {
+                if let Some(entry) = summary.0.get(t) {
+                    if entry.0.result.is_failure()
+                        || matches!(entry.0.result, TestResultType::Flake(_))
+                    {
+                        // Count flakes as success but report anyway
+                        if let Some(run) = &entry.1 {
+                            let mut test = if let TestResultType::Flake(res) = &entry.0.result {
+                                TestCase::success(
+                                    t,
+                                    junit_report::Duration::from_std(
+                                        run.duration.try_into().unwrap(),
+                                    )
                                     .unwrap(),
-                            )
-                            .set_system_out(&format!("{}\nFlake({:?})", run.result.stdout, res))
-                        } else {
-                            TestCase::failure(
-                                t,
-                                junit_report::Duration::from_std(run.duration.try_into().unwrap())
+                                )
+                                .set_system_out(&format!("{}\nFlake({:?})", run.result.stdout, res))
+                            } else {
+                                TestCase::failure(
+                                    t,
+                                    junit_report::Duration::from_std(
+                                        run.duration.try_into().unwrap(),
+                                    )
                                     .unwrap(),
-                                &format!("{:?}", entry.0.result),
-                                "",
-                            )
-                            .set_system_out(&run.result.stdout)
-                        };
+                                    &format!("{:?}", entry.0.result),
+                                    "",
+                                )
+                                .set_system_out(&run.result.stdout)
+                            };
 
-                        // Read stderr from failure dir
-                        if let (Some(fail_dir), Some(run_dir)) = (fail_dir, &run.fail_dir) {
-                            let path = fail_dir.join(run_dir).join(crate::STDERR_FILE);
-                            match File::open(&path) {
-                                Ok(f) => {
-                                    let mut last_lines =
-                                        VecDeque::with_capacity(crate::LAST_STDERR_LINES);
-                                    for l in BufReader::new(f).lines() {
-                                        let l = match l {
-                                            Ok(l) => l,
-                                            Err(e) => {
-                                                warn!(logger, "Failed to read stderr file";
+                            // Read stderr from failure dir
+                            if let (Some(fail_dir), Some(run_dir)) = (fail_dir, &run.fail_dir) {
+                                let path = fail_dir.join(run_dir).join(crate::STDERR_FILE);
+                                match File::open(&path) {
+                                    Ok(f) => {
+                                        let mut last_lines =
+                                            VecDeque::with_capacity(crate::LAST_STDERR_LINES);
+                                        for l in BufReader::new(f).lines() {
+                                            let l = match l {
+                                                Ok(l) => l,
+                                                Err(e) => {
+                                                    warn!(logger, "Failed to read stderr file";
                                                     "path" => ?path, "error" => %e);
-                                                break;
+                                                    break;
+                                                }
+                                            };
+                                            if last_lines.len() >= crate::LAST_STDERR_LINES {
+                                                last_lines.pop_front();
                                             }
-                                        };
-                                        if last_lines.len() >= crate::LAST_STDERR_LINES {
-                                            last_lines.pop_front();
+                                            last_lines.push_back(l);
                                         }
-                                        last_lines.push_back(l);
-                                    }
 
-                                    let mut last_lines_str = String::new();
-                                    for l in last_lines {
-                                        if !last_lines_str.is_empty() {
-                                            last_lines_str.push('\n');
+                                        let mut last_lines_str = String::new();
+                                        for l in last_lines {
+                                            if !last_lines_str.is_empty() {
+                                                last_lines_str.push('\n');
+                                            }
+                                            last_lines_str.push_str(&l);
                                         }
-                                        last_lines_str.push_str(&l);
+                                        test = test.set_system_err(&last_lines_str);
                                     }
-                                    test = test.set_system_err(&last_lines_str);
-                                }
-                                Err(e) => {
-                                    warn!(logger, "Failed to open stderr file"; "path" => ?path,
+                                    Err(e) => {
+                                        warn!(logger, "Failed to open stderr file"; "path" => ?path,
                                         "error" => %e);
+                                    }
                                 }
                             }
-                        }
 
-                        Some(test)
+                            Some(test)
+                        } else {
+                            Some(TestCase::failure(
+                                t,
+                                junit_report::Duration::seconds(0),
+                                &format!("{:?}", entry.0.result),
+                                "",
+                            ))
+                        }
                     } else {
-                        Some(TestCase::failure(
-                            t,
-                            junit_report::Duration::seconds(0),
-                            &format!("{:?}", entry.0.result),
-                            "",
-                        ))
+                        None
                     }
                 } else {
+                    has_not_run += 1;
                     None
                 }
-            } else {
-                Some(TestCase::error(
-                    t,
-                    junit_report::Duration::seconds(0),
-                    "NotRun",
-                    "",
-                ))
-            }
-        }));
+            }));
+
+        if has_not_run > 0 {
+            ts = ts.add_testcase(TestCase::error(
+                "",
+                junit_report::Duration::seconds(0),
+                "NotRun",
+                &format!("{} test cases were not run", has_not_run),
+            ));
+        }
 
         let r = junit_report::Report::new().add_testsuite(ts);
         let mut file = std::fs::File::create(file).map_err(WriteSummaryError::OpenFile)?;
