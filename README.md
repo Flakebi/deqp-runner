@@ -42,6 +42,7 @@ deqp-runner -t testlist.txt \
 ## Build
 Install [Rust](https://rust-lang.org) (preferred installation method is [rustup](https://rustup.rs))
 and build with `cargo build --release`.
+To install without cloning use `cargo install --git https://github.com/Flakebi/deqp-runner`.
 
 ## License
 Licensed under either of
