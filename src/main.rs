@@ -72,6 +72,7 @@ async fn real_main() -> Result<()> {
         args: options.run_command,
         capture_dumps: true,
         timeout: std::time::Duration::from_secs(options.timeout.into()),
+        max_failures: options.max_failures,
         fail_dir: Some(options.failures),
     };
 

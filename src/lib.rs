@@ -106,6 +106,11 @@ pub struct Options {
     /// A test that runs this long is considered failing.
     #[cfg_attr(feature = "bin", clap(long, default_value = "600"))]
     pub timeout: u32,
+    /// Abort after this amount of failures. 0 means disabled.
+    ///
+    /// This is not necessarily counted accurately.
+    #[cfg_attr(feature = "bin", clap(long, default_value = "100"))]
+    pub max_failures: usize,
     /// The deqp command to run. E.g. `./deqp-vk --deqp-caselist-file`
     ///
     /// A filename with the tests cases that should be run is appended to the command.
@@ -220,6 +225,7 @@ pub struct RunOptions {
     pub args: Vec<String>,
     pub capture_dumps: bool,
     pub timeout: std::time::Duration,
+    pub max_failures: usize,
     /// Directory where failure dumps should be created.
     pub fail_dir: Option<PathBuf>,
 }
@@ -1157,6 +1163,11 @@ pub async fn run_tests_parallel<'a>(
     };
 
     loop {
+        if options.max_failures != 0 && fails + crashes >= options.max_failures {
+            // Do not start new jobs when we have our max number of failures
+            pending_jobs.clear();
+        }
+
         while job_executor.len() < job_count {
             if let Some(job) = pending_jobs.pop_front() {
                 let logger = logger.new(o!("job" => job_id));
@@ -1304,6 +1315,7 @@ mod tests {
             args: args.iter().map(|s| s.to_string()).collect(),
             capture_dumps: true,
             timeout: std::time::Duration::from_secs(2),
+            max_failures: 0,
             fail_dir: None,
         };
 
