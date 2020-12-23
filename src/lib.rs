@@ -7,6 +7,7 @@ use std::mem;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::process::Stdio;
+use std::task::{Context, Poll};
 
 use futures::future::Either;
 use futures::prelude::*;
@@ -209,17 +210,8 @@ pub struct DeqpErrorWithOutput {
 
 #[derive(Debug)]
 pub enum DeqpEvent {
-    TestStart {
-        name: String,
-    },
-    TestEnd {
-        result: TestResult,
-    },
-    Finished {
-        result: Result<(), DeqpError>,
-        stdout: String,
-        stderr: String,
-    },
+    TestStart { name: String },
+    TestEnd { result: TestResult },
 }
 
 #[derive(Clone, Debug)]
@@ -284,17 +276,17 @@ enum Job<'a> {
     },
 }
 
-struct RunDeqpState {
+pub struct RunDeqpState {
     logger: Logger,
-    pid: Option<u32>,
+    pub pid: u32,
     timeout_duration: std::time::Duration,
     timeout: Sleep,
     stdout_reader: io::Lines<BufReader<ChildStdout>>,
     stderr_reader: io::Lines<BufReader<ChildStderr>>,
     /// Buffer for stdout
-    stdout: String,
+    pub stdout: String,
     /// Buffer for stderr
-    stderr: String,
+    pub stderr: String,
     stdout_finished: bool,
     stderr_finished: bool,
     /// Process exited
@@ -304,16 +296,16 @@ struct RunDeqpState {
     /// deqp reported a fatal error on stderr
     has_fatal_error: bool,
     /// Process exit status
-    finished_result: Option<Result<(), DeqpError>>,
-    child: tokio::process::Child,
+    pub finished_result: Option<Result<(), DeqpError>>,
+    child: Option<tokio::process::Child>,
 }
 
-struct RunTestListState<'a, 'list, S: Stream<Item = DeqpEvent>> {
+struct RunTestListState<'a, 'list> {
     logger: Logger,
     /// Input to the process that was last started.
     tests: &'list [&'a str],
     options: &'a RunOptions,
-    running: Option<(Option<u32>, S)>,
+    running: Option<RunDeqpState>,
     /// Index into current `tests` and start time.
     cur_test: Option<(usize, OffsetDateTime)>,
     last_finished: Option<usize>,
@@ -377,17 +369,22 @@ impl<'a> From<DeqpErrorWithOutput> for JobEvent<'a> {
 }
 
 impl RunDeqpState {
-    fn new(mut logger: Logger, timeout_duration: std::time::Duration, mut child: Child) -> Self {
-        let pid = child.id();
-        if let Some(id) = pid {
-            logger = logger.new(o!("pid" => id));
-        } else {
-            warn!(logger, "Failed to gte child process pid");
-        }
+    fn new(
+        mut logger: Logger,
+        timeout_duration: std::time::Duration,
+        mut child: Child,
+    ) -> Result<Self, DeqpError> {
+        let pid = child.id().ok_or_else(|| {
+            DeqpError::SpawnFailed(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                "Failed to get child pid",
+            ))
+        })?;
+        logger = logger.new(o!("pid" => pid));
 
         let stdout = child.stdout.take().unwrap();
         let stderr = child.stderr.take().unwrap();
-        Self {
+        Ok(Self {
             logger,
             pid,
             timeout_duration,
@@ -403,98 +400,98 @@ impl RunDeqpState {
             tests_done: false,
             has_fatal_error: false,
             finished_result: None,
-            child,
-        }
+            child: Some(child),
+        })
     }
 
     fn handle_stdout_line(
         &mut self,
-        l: Result<Option<String>, std::io::Error>,
+        l: Option<Result<String, std::io::Error>>,
     ) -> Option<DeqpEvent> {
         let l = match l {
-            Ok(r) => r,
-            Err(e) => {
+            None => {
+                self.stdout_finished = true;
+                return None;
+            }
+            Some(Ok(r)) => r,
+            Some(Err(e)) => {
                 self.stdout_finished = true;
                 debug!(self.logger, "Failed to read stdout of process"; "error" => %e);
                 return None;
             }
         };
-        if let Some(l) = l {
-            if self.tests_done {
-                if !l.is_empty() {
-                    self.stdout.push_str(&l);
-                    self.stdout.push('\n');
-                }
-                return None;
+        if self.tests_done {
+            if !l.is_empty() {
+                self.stdout.push_str(&l);
+                self.stdout.push('\n');
             }
+            return None;
+        }
 
-            if let Some(l) = l.strip_prefix("  ") {
-                for (s, res) in &*RESULT_VARIANTS {
-                    if let Some(l) = l.strip_prefix(s) {
-                        let mut l = l.trim();
-                        if l.starts_with('(') && l.ends_with(')') {
-                            l = &l[1..l.len() - 1];
-                        }
-                        self.stdout.push_str(l);
-                        self.timeout = tokio::time::sleep(self.timeout_duration);
-                        return Some(DeqpEvent::TestEnd {
-                            result: TestResult {
-                                stdout: mem::replace(&mut self.stdout, String::new()),
-                                variant: res.clone(),
-                            },
-                        });
+        if let Some(l) = l.strip_prefix("  ") {
+            for (s, res) in &*RESULT_VARIANTS {
+                if let Some(l) = l.strip_prefix(s) {
+                    let mut l = l.trim();
+                    if l.starts_with('(') && l.ends_with(')') {
+                        l = &l[1..l.len() - 1];
                     }
+                    self.stdout.push_str(l);
+                    self.timeout = tokio::time::sleep(self.timeout_duration);
+                    return Some(DeqpEvent::TestEnd {
+                        result: TestResult {
+                            stdout: mem::replace(&mut self.stdout, String::new()),
+                            variant: res.clone(),
+                        },
+                    });
                 }
             }
+        }
 
-            if let Some(l) = l.strip_prefix("TEST: ") {
-                return Some(DeqpEvent::TestStart {
-                    name: l.to_string(),
-                });
-            } else if let Some(l) = l.strip_prefix("Test case '") {
-                if let Some(l) = l.strip_suffix("'..") {
-                    self.stdout.clear();
-                    return Some(DeqpEvent::TestStart { name: l.into() });
-                } else {
-                    self.stdout.push_str(&l);
-                    self.stdout.push('\n');
-                }
-            } else if l == "DONE!" {
-                self.tests_done = true;
-            } else if l.is_empty() {
+        if let Some(l) = l.strip_prefix("TEST: ") {
+            return Some(DeqpEvent::TestStart {
+                name: l.to_string(),
+            });
+        } else if let Some(l) = l.strip_prefix("Test case '") {
+            if let Some(l) = l.strip_suffix("'..") {
+                self.stdout.clear();
+                return Some(DeqpEvent::TestStart { name: l.into() });
             } else {
                 self.stdout.push_str(&l);
                 self.stdout.push('\n');
             }
+        } else if l == "DONE!" {
+            self.tests_done = true;
+        } else if l.is_empty() {
         } else {
-            self.stdout_finished = true;
+            self.stdout.push_str(&l);
+            self.stdout.push('\n');
         }
         None
     }
 
-    fn handle_stderr_line(&mut self, l: Result<Option<String>, std::io::Error>) {
+    fn handle_stderr_line(&mut self, l: Option<Result<String, std::io::Error>>) {
         let l = match l {
-            Ok(r) => r,
-            Err(e) => {
+            None => {
+                self.stderr_finished = true;
+                return;
+            }
+            Some(Ok(r)) => r,
+            Some(Err(e)) => {
                 self.stderr_finished = true;
                 debug!(self.logger, "Failed to read stderr of process"; "error" => %e);
                 return;
             }
         };
-        if let Some(l) = l {
-            if l.contains("FATAL ERROR: ") {
-                warn!(self.logger, "Deqp encountered fatal error"; "error" => &l);
-                self.has_fatal_error = true;
-            }
-            self.stderr.push_str(&l);
-            self.stderr.push('\n');
-        } else {
-            self.stderr_finished = true;
+        if l.contains("FATAL ERROR: ") {
+            warn!(self.logger, "Deqp encountered fatal error"; "error" => &l);
+            self.has_fatal_error = true;
         }
+        self.stderr.push_str(&l);
+        self.stderr.push('\n');
     }
 }
 
-impl<'a, 'list, S: Stream<Item = DeqpEvent>> RunTestListState<'a, 'list, S> {
+impl<'a, 'list> RunTestListState<'a, 'list> {
     fn new(logger: Logger, tests: &'list [&'a str], options: &'a RunOptions) -> Self {
         RunTestListState {
             logger,
@@ -553,65 +550,65 @@ impl<'a, 'list, S: Stream<Item = DeqpEvent>> RunTestListState<'a, 'list, S> {
     }
 
     fn create_fail_dir(&mut self, failed_test: &str) {
-        if self.fail_dir.is_some() {
-            return;
-        }
-        if let Some(dir) = &self.options.fail_dir {
-            for i in 0.. {
-                let dir_name = if i == 0 {
-                    failed_test.to_string()
-                } else {
-                    format!("{}-{}", failed_test, i)
-                };
-                let new_dir = dir.join(&dir_name);
-                if !new_dir.exists() {
-                    if let Err(e) = std::fs::create_dir_all(&new_dir) {
-                        error!(self.logger, "Failed to create failure directory"; "error" => %e);
-                        return;
-                    }
-                    self.fail_dir = Some(dir_name);
-                    // Write reproduce-list.txt
-                    match std::fs::File::create(new_dir.join(TEST_LIST_FILE)) {
-                        Ok(mut f) => {
-                            if let Err(e) = (|| -> Result<(), std::io::Error> {
-                                // Write options
-                                write!(&mut f, "#!")?;
-                                if self
-                                    .options
-                                    .args
-                                    .first()
-                                    .map(|a| !a.starts_with('/'))
-                                    .unwrap_or_default()
-                                {
-                                    write!(&mut f, "/usr/bin/env -S ")?;
-                                }
-                                writeln!(
-                                    &mut f,
-                                    "{}",
-                                    self.options
+        if self.fail_dir.is_none() {
+            if let Some(dir) = &self.options.fail_dir {
+                for i in 0.. {
+                    let dir_name = if i == 0 {
+                        failed_test.to_string()
+                    } else {
+                        format!("{}-{}", failed_test, i)
+                    };
+                    let new_dir = dir.join(&dir_name);
+                    if !new_dir.exists() {
+                        if let Err(e) = std::fs::create_dir_all(&new_dir) {
+                            error!(self.logger, "Failed to create failure directory";
+                                "error" => %e);
+                            return;
+                        }
+                        self.fail_dir = Some(dir_name);
+                        // Write reproduce-list.txt
+                        match std::fs::File::create(new_dir.join(TEST_LIST_FILE)) {
+                            Ok(mut f) => {
+                                if let Err(e) = (|| -> Result<(), std::io::Error> {
+                                    // Write options
+                                    write!(&mut f, "#!")?;
+                                    if self
+                                        .options
                                         .args
-                                        .iter()
-                                        .map(|a| a.replace('\n', "\\n"))
-                                        .collect::<Vec<_>>()
-                                        .join(" ")
-                                )?;
+                                        .first()
+                                        .map(|a| !a.starts_with('/'))
+                                        .unwrap_or_default()
+                                    {
+                                        write!(&mut f, "/usr/bin/env -S ")?;
+                                    }
+                                    writeln!(
+                                        &mut f,
+                                        "{}",
+                                        self.options
+                                            .args
+                                            .iter()
+                                            .map(|a| a.replace('\n', "\\n"))
+                                            .collect::<Vec<_>>()
+                                            .join(" ")
+                                    )?;
 
-                                // Write tests
-                                for t in self.tests {
-                                    writeln!(&mut f, "{}", t)?;
+                                    // Write tests
+                                    for t in self.tests {
+                                        writeln!(&mut f, "{}", t)?;
+                                    }
+                                    Ok(())
+                                })() {
+                                    error!(self.logger, "Failed to write reproduce list";
+                                        "error" => %e);
                                 }
-                                Ok(())
-                            })() {
-                                error!(self.logger, "Failed to write reproduce list";
+                            }
+                            Err(e) => {
+                                error!(self.logger, "Failed to create reproduce list file";
                                     "error" => %e);
                             }
                         }
-                        Err(e) => {
-                            error!(self.logger, "Failed to create reproduce list file";
-                                "error" => %e);
-                        }
+                        break;
                     }
-                    break;
                 }
             }
         }
@@ -637,7 +634,7 @@ impl<'a, 'list, S: Stream<Item = DeqpEvent>> RunTestListState<'a, 'list, S> {
 
     fn get_missing(&self, count: usize) -> Vec<RunTestListEvent<'a, 'list>> {
         let start = self.last_finished.map(|i| i + 1).unwrap_or_default();
-        let pid = self.running.as_ref().and_then(|r| r.0);
+        let pid = self.running.as_ref().map(|r| r.pid);
         (0..count)
             .map(|i| {
                 RunTestListEvent::TestResult(ReproducibleTestResultData {
@@ -687,7 +684,7 @@ impl<'a, 'list, S: Stream<Item = DeqpEvent>> RunTestListState<'a, 'list, S> {
                     result,
                     start: cur_test.1,
                     duration,
-                    pid: self.running.as_ref().and_then(|r| r.0),
+                    pid: self.running.as_ref().map(|r| r.pid),
                     fail_dir: if is_failure {
                         self.fail_dir.clone()
                     } else {
@@ -746,7 +743,7 @@ impl<'a, 'list, S: Stream<Item = DeqpEvent>> RunTestListState<'a, 'list, S> {
                     },
                     start: cur_test.1,
                     duration,
-                    pid: self.running.as_ref().and_then(|r| r.0),
+                    pid: self.running.as_ref().map(|r| r.pid),
                     fail_dir: self.fail_dir.clone(),
                 },
                 run_list,
@@ -981,7 +978,7 @@ pub fn run_deqp<S: AsRef<OsStr> + std::fmt::Debug>(
     timeout_duration: std::time::Duration,
     args: &[S],
     env: &[(&str, &str)],
-) -> (Option<u32>, impl Stream<Item = DeqpEvent>) {
+) -> Result<RunDeqpState, DeqpError> {
     debug!(logger, "Start deqp"; "args" => ?args);
     let mut cmd = Command::new(&args[0]);
     cmd.args(&args[1..])
@@ -991,7 +988,8 @@ pub fn run_deqp<S: AsRef<OsStr> + std::fmt::Debug>(
         .kill_on_drop(true);
 
     trace!(logger, "Run deqp"; "args" => ?args);
-    let child = match cmd.spawn() {
+    // TODO
+    /*let child = match cmd.spawn() {
         Ok(r) => r,
         Err(e) => {
             let r: Pin<Box<dyn Stream<Item = DeqpEvent> + Send>> =
@@ -1002,85 +1000,86 @@ pub fn run_deqp<S: AsRef<OsStr> + std::fmt::Debug>(
                 })));
             return (None, r);
         }
-    };
+    };*/
 
-    let mut state = RunDeqpState::new(logger, timeout_duration, child);
-    let pid = state.pid;
+    let child = cmd.spawn().map_err(DeqpError::SpawnFailed)?;
+    RunDeqpState::new(logger, timeout_duration, child)
+}
 
-    (pid, Box::pin(gen!({
+impl Stream for RunDeqpState {
+    type Item = DeqpEvent;
+    fn poll_next(mut self: Pin<&mut Self>, ctx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         // Continue reading stdout and stderr even when the process exited
         loop {
-            if state.has_timeout {
-                match state.finished_result.take() {
-                    Some(mut result) => {
-                        if state.has_fatal_error {
-                            result = Err(DeqpError::DeqpFatalError);
-                        }
-                        yield_!(DeqpEvent::Finished {
-                            result,
-                            stdout: mem::replace(&mut state.stdout, String::new()),
-                            stderr: mem::replace(&mut state.stderr, String::new()),
-                        });
+            if !self.stdout_finished {
+                if let Poll::Ready(r) = self.stdout_reader.poll_next_unpin(ctx) {
+                    if let Some(r) = self.handle_stdout_line(r) {
+                        return Poll::Ready(Some(r));
+                    } else {
+                        continue;
                     }
-                    None => {
+                }
+            }
+
+            if !self.stderr_finished {
+                if let Poll::Ready(r) = self.stderr_reader.poll_next_unpin(ctx) {
+                    self.handle_stderr_line(r);
+                    continue;
+                }
+            }
+
+            if !self.finished {
+                // Wait for process in parallel so it can make progress
+                let res = if let Poll::Ready(r) =
+                    Pin::new(&mut Box::pin(self.child.as_mut().unwrap().wait())).poll(ctx)
+                {
+                    Some(match r {
+                        Ok(status) if status.success() => Ok(()),
+                        Ok(status) => Err(DeqpError::Crash {
+                            exit_status: status.code(),
+                        }),
+                        Err(e) => Err(DeqpError::WaitFailed(e)),
+                    })
+                } else {
+                    None
+                };
+                if let Some(res) = res {
+                    self.finished_result = Some(res);
+                    self.finished = true;
+                    continue;
+                }
+
+                if !self.has_timeout {
+                    if let Poll::Ready(_) = self.timeout.poll_unpin(ctx) {
+                        debug!(self.logger, "Detected timeout");
+                        self.has_timeout = true;
+                        if self.has_fatal_error {
+                            self.finished_result = Some(Err(DeqpError::FatalError));
+                        } else {
+                            self.finished_result = Some(Err(DeqpError::Timeout));
+                        }
                         // Kill deqp
-                        let logger = state.logger;
-                        let mut child = state.child;
+                        let logger = self.logger.clone();
+                        let mut child = self.child.take().unwrap();
                         tokio::spawn(async move {
                             if let Err(e) = child.kill().await {
                                 error!(logger, "Failed to kill deqp after timeout"; "error" => %e);
                             }
                         });
-                        return;
+                        return Poll::Ready(None);
                     }
                 }
             }
 
-            if let Some(res) = tokio::select! {
-                // Stdout
-                l = state.stdout_reader.next_line(), if !state.stdout_finished => {
-                    state.handle_stdout_line(l)
+            if self.stdout_finished && self.stderr_finished && self.finished {
+                if self.has_fatal_error {
+                    self.finished_result = Some(Err(DeqpError::DeqpFatalError));
                 }
-                // Stderr
-                l = state.stderr_reader.next_line(), if !state.stderr_finished => {
-                    state.handle_stderr_line(l);
-                    None
-                }
-                // Wait for process in parallel so it can make progress
-                r = state.child.wait(), if !state.finished => {
-                    state.finished_result = Some(match r {
-                        Ok(status) if status.success() => Ok(()),
-                        Ok(status) => Err(DeqpError::Crash { exit_status: status.code(), }),
-                        Err(e) => Err(DeqpError::WaitFailed(e)),
-                    });
-                    state.finished = true;
-                    None
-                }
-                _ = &mut state.timeout, if !state.has_timeout && !state.finished => {
-                    debug!(state.logger, "Detected timeout");
-                    state.has_timeout = true;
-                    state.finished_result = Some(Err(DeqpError::Timeout));
-                    None
-                }
-                // Return finished here as stdout and stderr are completely read
-                else => match state.finished_result.take() {
-                    Some(mut result) => {
-                        if state.has_fatal_error {
-                            result = Err(DeqpError::DeqpFatalError);
-                        }
-                        Some(DeqpEvent::Finished {
-                            result,
-                            stdout: mem::replace(&mut state.stdout, String::new()),
-                            stderr: mem::replace(&mut state.stderr, String::new()),
-                        })
-                    }
-                    None => return,
-                },
-            } {
-                yield_!(res);
+                return Poll::Ready(None);
             }
+            break Poll::Pending;
         }
-    })))
+    }
 }
 
 /// Run a list of tests and restart the process with remaining tests if it crashed.
@@ -1108,11 +1107,29 @@ pub fn run_test_list<'a, 'list>(
                         return;
                     }
                 };
-                state.running = Some(run_deqp(state.logger.clone(), options.timeout, &args, &[]));
+                match run_deqp(state.logger.clone(), options.timeout, &args, &[]) {
+                    Ok(r) => state.running = Some(r),
+                    Err(e) => {
+                        yield_!(RunTestListEvent::DeqpError(DeqpErrorWithOutput {
+                            error: e,
+                            stdout: String::new(),
+                            stderr: String::new(),
+                        }));
+                        return;
+                    }
+                }
             }
 
-            match state.running.as_mut().unwrap().1.next().await {
-                None => return,
+            let running = state.running.as_mut().unwrap();
+            match running.next().await {
+                None => {
+                    let running = state.running.take().unwrap();
+                    let res = running.finished_result.unwrap_or_else(|| panic!("TODO"));
+                    for r in state.handle_finished(res, running.stdout, running.stderr) {
+                        yield_!(r);
+                    }
+                    return;
+                }
                 Some(e) => match e {
                     DeqpEvent::TestStart { name } => {
                         for r in state.handle_test_start(&name) {
@@ -1121,15 +1138,6 @@ pub fn run_test_list<'a, 'list>(
                     }
                     DeqpEvent::TestEnd { result } => {
                         if let Some(r) = state.handle_test_end(result) {
-                            yield_!(r);
-                        }
-                    }
-                    DeqpEvent::Finished {
-                        result,
-                        stdout,
-                        stderr,
-                    } => {
-                        for r in state.handle_finished(result, stdout, stderr) {
                             yield_!(r);
                         }
                     }
@@ -1436,8 +1444,6 @@ mod tests {
             ("dEQP-VK.tessellation.primitive_discard.triangles_fractional_even_spacing_ccw_point_mode", TestResultType::Pass),
             ("dEQP-VK.tessellation.primitive_discard.triangles_fractional_even_spacing_cw", TestResultType::Pass),
             ("dEQP-VK.tessellation.primitive_discard.triangles_fractional_even_spacing_cw_point_mode", TestResultType::Crash),
-            ("dEQP-VK.fragment_shader_interlock.basic.discard.ssbo.shading_rate_unordered.4xaa.sample_shading.512x512", TestResultType::Missing),
-            ("dEQP-VK.fragment_shader_interlock.basic.discard.ssbo.shading_rate_unordered.4xaa.sample_shading.1024x1024", TestResultType::Missing),
         ];
 
         check_tests(
@@ -1528,8 +1534,6 @@ mod tests {
             ("dEQP-VK.tessellation.primitive_discard.triangles_fractional_even_spacing_ccw_point_mode", TestResultType::Pass),
             ("dEQP-VK.tessellation.primitive_discard.triangles_fractional_even_spacing_cw", TestResultType::Pass),
             ("dEQP-VK.tessellation.primitive_discard.triangles_fractional_even_spacing_cw_point_mode", TestResultType::Crash),
-            ("dEQP-VK.fragment_shader_interlock.basic.discard.ssbo.shading_rate_unordered.4xaa.sample_shading.512x512", TestResultType::NotSupported),
-            ("dEQP-VK.fragment_shader_interlock.basic.discard.ssbo.shading_rate_unordered.4xaa.sample_shading.1024x1024", TestResultType::NotSupported),
         ];
 
         check_tests_with_summary(
@@ -1539,7 +1543,7 @@ mod tests {
                 // TODO Check bisection result with get_test_results returned by check_tests
                 let res = summary.0.get("dEQP-VK.tessellation.primitive_discard.triangles_fractional_even_spacing_cw_point_mode").unwrap();
                 assert_eq!(res.1.as_ref().unwrap().fail_dir, None);
-                assert_eq!(res.0.run_id, Some(25));
+                assert_eq!(res.0.run_id, Some(23));
             }
         )
         .await?;
