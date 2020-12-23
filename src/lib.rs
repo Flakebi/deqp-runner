@@ -1318,7 +1318,7 @@ mod tests {
 
     use super::*;
 
-    fn create_logger() -> Logger {
+    pub(crate) fn create_logger() -> Logger {
         let decorator = slog_term::PlainDecorator::new(slog_term::TestStdoutWriter);
         let drain = Mutex::new(slog_term::FullFormat::new(decorator).build()).fuse();
 
@@ -1412,8 +1412,6 @@ mod tests {
             &expected,
         )
         .await?;
-
-        //write_summary(&tests, &summary, Some(&options.csv_summary), Some(&options.xml_summary))?;
 
         Ok(())
     }
