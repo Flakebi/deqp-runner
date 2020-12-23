@@ -30,10 +30,6 @@ pub mod summary;
 
 pub use summary::Summary;
 
-// TODO Write fatal error into stderr buffer
-// TODO Create and append to stderr file
-// TODO More functional, no actual file writing
-
 /// This many tests will be executed with a single deqp run.
 pub const BATCH_SIZE: usize = 1000;
 /// Name of the file where stderr is saved.
@@ -48,6 +44,8 @@ pub const CSV_SUMMARY: &str = "summary.csv";
 pub const XML_SUMMARY: &str = "summary.xml";
 /// Directory name where failure folders are stored.
 pub const FAIL_DIR: &str = "fails";
+/// Dummy name if a failure cannot be attributed to a test.
+pub const UNKNOWN_TEST_NAME: &str = "unknown";
 /// These many lines from stderr will be saved in the junit xml result file.
 const LAST_STDERR_LINES: usize = 5;
 
@@ -205,7 +203,6 @@ pub enum DeqpError {
 pub struct DeqpErrorWithOutput {
     error: DeqpError,
     stdout: String,
-    stderr: String,
 }
 
 #[derive(Debug)]
@@ -515,14 +512,12 @@ impl<'a, 'list> RunTestListState<'a, 'list> {
         // Create a temporary file for the test list
         let mut temp_file = NamedTempFile::new().map_err(|e| DeqpErrorWithOutput {
             error: DeqpError::FatalError,
-            stdout: String::new(),
-            stderr: format!("Failed to create temporary file for test list: {}", e),
+            stdout: format!("Failed to create temporary file for test list: {}", e),
         })?;
         for t in self.tests {
             writeln!(&mut temp_file, "{}", t).map_err(|e| DeqpErrorWithOutput {
                 error: DeqpError::FatalError,
-                stdout: String::new(),
-                stderr: format!("Failed to write temporary file for test list: {}", e),
+                stdout: format!("Failed to write temporary file for test list: {}", e),
             })?;
         }
 
@@ -534,8 +529,7 @@ impl<'a, 'list> RunTestListState<'a, 'list> {
                 .to_str()
                 .ok_or_else(|| DeqpErrorWithOutput {
                     error: DeqpError::FatalError,
-                    stdout: String::new(),
-                    stderr: format!(
+                    stdout: format!(
                         "Failed to get name of temporary file for test list (path: {:?})",
                         temp_file.path()
                     ),
@@ -612,6 +606,14 @@ impl<'a, 'list> RunTestListState<'a, 'list> {
                 }
             }
         }
+
+        if let Some(running) = &mut self.running {
+            if !running.stderr.is_empty() {
+                // Save current stderr
+                let stderr = mem::replace(&mut running.stderr, String::new());
+                self.save_fail_dir_stderr(&stderr);
+            }
+        }
     }
 
     /// Save stderr to the current `fail_dir` if there is one.
@@ -619,7 +621,11 @@ impl<'a, 'list> RunTestListState<'a, 'list> {
         if let Some(dir_name) = &self.fail_dir {
             let fail_dir = self.options.fail_dir.as_ref().unwrap().join(dir_name);
             // Save stderr
-            match std::fs::File::create(fail_dir.join(STDERR_FILE)) {
+            match std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(fail_dir.join(STDERR_FILE))
+            {
                 Ok(mut f) => {
                     if let Err(e) = f.write_all(stderr.as_bytes()) {
                         error!(self.logger, "Failed to write stderr file"; "error" => %e);
@@ -629,6 +635,11 @@ impl<'a, 'list> RunTestListState<'a, 'list> {
                     error!(self.logger, "Failed to create stderr file"; "error" => %e);
                 }
             }
+        } else {
+            warn!(
+                self.logger,
+                "Tried to save stderr without a fail dir set, ignoring"
+            );
         }
     }
 
@@ -701,27 +712,21 @@ impl<'a, 'list> RunTestListState<'a, 'list> {
         }
     }
 
-    fn handle_finished(
-        &mut self,
-        result: Result<(), DeqpError>,
-        stdout: String,
-        stderr: String,
-    ) -> Vec<RunTestListEvent<'a, 'list>> {
-        trace!(self.logger, "Finished"; "result" => ?result, "stdout" => &stdout,
-            "stderr" => &stderr);
-        self.running = None;
-        self.save_fail_dir_stderr(&stderr);
+    fn handle_finished(&mut self, state: RunDeqpState) -> Vec<RunTestListEvent<'a, 'list>> {
+        trace!(self.logger, "Finished"; "result" => ?state.finished_result,
+            "stdout" => &state.stdout, "stderr" => &state.stderr);
 
-        if let Some(cur_test) = self.cur_test {
+        let mut is_failure = true;
+        let res = if let Some(cur_test) = self.cur_test {
             let duration = OffsetDateTime::now_utc() - cur_test.1;
-            // TODO Need to do that earlier, if the test times out
-            // TODO Also add a test for that
-            if self.fail_dir.is_none() {
-                self.create_fail_dir(self.tests[cur_test.0]);
-                self.save_fail_dir_stderr(&stderr);
-            }
+            self.create_fail_dir(self.tests[cur_test.0]);
 
-            if result.is_ok() {
+            if state
+                .finished_result
+                .as_ref()
+                .map(Result::is_ok)
+                .unwrap_or_default()
+            {
                 warn!(self.logger, "test not finished but deqp exited successful, count as failure";
                     "cur_test" => self.tests[cur_test.0], "started" => %cur_test.1);
             }
@@ -730,12 +735,12 @@ impl<'a, 'list> RunTestListState<'a, 'list> {
             let run_list = &self.tests[..cur_test.0 + 1];
             self.tests = &self.tests[cur_test.0 + 1..];
 
-            vec![RunTestListEvent::TestResult(ReproducibleTestResultData {
+            let mut res = vec![RunTestListEvent::TestResult(ReproducibleTestResultData {
                 data: TestResultData {
                     name: run_list[cur_test.0],
                     result: TestResult {
-                        stdout,
-                        variant: if matches!(result, Err(DeqpError::Timeout)) {
+                        stdout: state.stdout,
+                        variant: if matches!(state.finished_result, Some(Err(DeqpError::Timeout))) {
                             TestResultType::Timeout
                         } else {
                             TestResultType::Crash
@@ -743,33 +748,57 @@ impl<'a, 'list> RunTestListState<'a, 'list> {
                     },
                     start: cur_test.1,
                     duration,
-                    pid: self.running.as_ref().map(|r| r.pid),
+                    pid: Some(state.pid),
                     fail_dir: self.fail_dir.clone(),
                 },
                 run_list,
                 args: &self.options.args,
-            })]
-        } else if let Err(e) = result {
+            })];
+
+            if let Some(Err(e)) = state.finished_result {
+                if e.is_fatal() {
+                    res.push(RunTestListEvent::DeqpError(DeqpErrorWithOutput {
+                        error: e,
+                        stdout: String::new(),
+                    }));
+                }
+            }
+            res
+        } else if let Some(e) = state
+            .finished_result
+            .map(Result::err)
+            .unwrap_or_else(|| Some(DeqpError::FatalError))
+        {
             if let Some(last_finished) = self.last_finished {
-                // No current test executed, so probably some tests are failing
+                self.create_fail_dir(self.tests[last_finished]);
+                // No current test executed, so probably some tests are failing, therefore the exit
+                // status is not 0
                 // Mark rest of tests as missing
-                let r = self.get_missing(self.tests.len() - last_finished - 1);
+                let mut r = self.get_missing(self.tests.len() - last_finished - 1);
                 self.tests = &[];
+                if e.is_fatal() {
+                    r.push(RunTestListEvent::DeqpError(DeqpErrorWithOutput {
+                        error: e,
+                        stdout: state.stdout,
+                    }));
+                }
                 r
             } else {
-                // No test executed or crashed in between tests, counts as fatal error
+                self.create_fail_dir(UNKNOWN_TEST_NAME);
+                // No test executed, counts as fatal error
                 self.tests = &[];
                 warn!(self.logger, "Deqp exited without running tests, aborting"; "error" => ?e);
                 vec![RunTestListEvent::DeqpError(DeqpErrorWithOutput {
                     error: DeqpError::FatalError,
-                    stdout,
-                    stderr,
+                    stdout: state.stdout,
                 })]
             }
         } else {
+            is_failure = false;
             let r = if let Some(last_finished) = self.last_finished {
                 // Mark rest of tests as missing
-                debug!(self.logger, "not all missing"; "tests" => ?self.tests, "last" => last_finished);
+                debug!(self.logger, "not all missing"; "tests" => ?self.tests,
+                    "last" => last_finished);
                 self.get_missing(self.tests.len() - last_finished - 1)
             } else {
                 // No test executed, counts all tests as missing
@@ -778,7 +807,15 @@ impl<'a, 'list> RunTestListState<'a, 'list> {
             };
             self.tests = &[];
             r
+        };
+
+        if is_failure || self.fail_dir.is_some() {
+            // Create a fail dir if there is none yet
+            self.create_fail_dir(UNKNOWN_TEST_NAME);
+            // Save rest of stderr
+            self.save_fail_dir_stderr(&state.stderr);
         }
+        res
     }
 }
 
@@ -988,20 +1025,6 @@ pub fn run_deqp<S: AsRef<OsStr> + std::fmt::Debug>(
         .kill_on_drop(true);
 
     trace!(logger, "Run deqp"; "args" => ?args);
-    // TODO
-    /*let child = match cmd.spawn() {
-        Ok(r) => r,
-        Err(e) => {
-            let r: Pin<Box<dyn Stream<Item = DeqpEvent> + Send>> =
-                Box::pin(stream::once(future::ready(DeqpEvent::Finished {
-                    result: Err(DeqpError::SpawnFailed(e)),
-                    stdout: String::new(),
-                    stderr: String::new(),
-                })));
-            return (None, r);
-        }
-    };*/
-
     let child = cmd.spawn().map_err(DeqpError::SpawnFailed)?;
     RunDeqpState::new(logger, timeout_duration, child)
 }
@@ -1112,8 +1135,7 @@ pub fn run_test_list<'a, 'list>(
                     Err(e) => {
                         yield_!(RunTestListEvent::DeqpError(DeqpErrorWithOutput {
                             error: e,
-                            stdout: String::new(),
-                            stderr: String::new(),
+                            stdout: "Failed to start deqp process".into(),
                         }));
                         return;
                     }
@@ -1124,8 +1146,7 @@ pub fn run_test_list<'a, 'list>(
             match running.next().await {
                 None => {
                     let running = state.running.take().unwrap();
-                    let res = running.finished_result.unwrap_or_else(|| panic!("TODO"));
-                    for r in state.handle_finished(res, running.stdout, running.stderr) {
+                    for r in state.handle_finished(running) {
                         yield_!(r);
                     }
                     return;
@@ -1507,6 +1528,41 @@ mod tests {
         check_tests(
             &["test/test-timeout.sh", "logs/d", "/dev/null", "1"],
             &expected,
+        )
+        .await?;
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_timeout_fatal_error() -> Result<()> {
+        let expected = vec![
+            ("dEQP-VK.tessellation.primitive_discard.triangles_equal_spacing_ccw", TestResultType::Pass),
+            ("dEQP-VK.tessellation.primitive_discard.triangles_equal_spacing_ccw_point_mode", TestResultType::Pass),
+            ("dEQP-VK.tessellation.primitive_discard.triangles_equal_spacing_cw", TestResultType::Pass),
+            ("dEQP-VK.tessellation.primitive_discard.triangles_equal_spacing_cw_point_mode", TestResultType::Pass),
+            ("dEQP-VK.tessellation.primitive_discard.triangles_fractional_odd_spacing_ccw_valid_levels", TestResultType::Pass),
+            ("dEQP-VK.tessellation.primitive_discard.triangles_fractional_odd_spacing_ccw", TestResultType::Pass),
+            ("dEQP-VK.tessellation.primitive_discard.triangles_fractional_odd_spacing_ccw_point_mode_valid_levels", TestResultType::Pass),
+            ("dEQP-VK.tessellation.primitive_discard.triangles_fractional_odd_spacing_ccw_point_mode", TestResultType::Pass),
+            ("dEQP-VK.tessellation.primitive_discard.triangles_fractional_odd_spacing_cw_valid_levels", TestResultType::Pass),
+            ("dEQP-VK.tessellation.primitive_discard.triangles_fractional_odd_spacing_cw", TestResultType::Pass),
+            ("dEQP-VK.tessellation.primitive_discard.triangles_fractional_odd_spacing_cw_point_mode_valid_levels", TestResultType::Pass),
+            ("dEQP-VK.tessellation.primitive_discard.triangles_fractional_odd_spacing_cw_point_mode", TestResultType::Pass),
+            ("dEQP-VK.tessellation.primitive_discard.triangles_fractional_even_spacing_ccw", TestResultType::Pass),
+            ("dEQP-VK.tessellation.primitive_discard.triangles_fractional_even_spacing_ccw_point_mode", TestResultType::Pass),
+            ("dEQP-VK.tessellation.primitive_discard.triangles_fractional_even_spacing_cw", TestResultType::Pass),
+            ("dEQP-VK.tessellation.primitive_discard.triangles_fractional_even_spacing_cw_point_mode", TestResultType::Crash),
+        ];
+
+        check_tests_with_summary(
+            &["test/test-timeout.sh", "logs/d", "logs/d-err", "1"],
+            &expected,
+            |summary| {
+                let res = summary.0.get("dEQP-VK.tessellation.primitive_discard.triangles_fractional_even_spacing_cw_point_mode").unwrap();
+                assert_eq!(res.0.run_id, Some(15));
+                assert!(res.1.as_ref().unwrap().pid.is_some());
+            }
         )
         .await?;
 
