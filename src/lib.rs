@@ -29,10 +29,24 @@ pub mod summary;
 
 pub use summary::Summary;
 
+// TODO Write fatal error into stderr buffer
+// TODO Create and append to stderr file
+// TODO More functional, no actual file writing
+
 /// This many tests will be executed with a single deqp run.
-const BATCH_SIZE: usize = 1000;
+pub const BATCH_SIZE: usize = 1000;
 /// Name of the file where stderr is saved.
 const STDERR_FILE: &str = "stderr.txt";
+/// Name of the file where the test list is saved.
+const TEST_LIST_FILE: &str = "reproduce-list.txt";
+/// Directory name where failure folders are stored.
+pub const LOG_FILE: &str = "log.json";
+/// CSV summary file with one test per line.
+pub const CSV_SUMMARY: &str = "summary.csv";
+/// XML junit summary file.
+pub const XML_SUMMARY: &str = "summary.xml";
+/// Directory name where failure folders are stored.
+pub const FAIL_DIR: &str = "fails";
 /// These many lines from stderr will be saved in the junit xml result file.
 const LAST_STDERR_LINES: usize = 5;
 
@@ -78,26 +92,12 @@ pub struct Options {
     /// End of test range from test list.
     #[cfg_attr(feature = "bin", clap(long))]
     pub end: Option<usize>,
-    /// Path for the csv summary file.
+    /// Path for the output folder.
     ///
-    /// Writes a csv file with one line for every run test.
-    #[cfg_attr(feature = "bin", clap(short, long, default_value = "summary.csv"))]
-    pub csv_summary: PathBuf,
-    /// Path for the junit xml file.
-    ///
-    /// Writes an xml file in the junit format containing the failures.
-    #[cfg_attr(feature = "bin", clap(short, long, default_value = "summary.xml"))]
-    pub xml_summary: PathBuf,
-    /// Path for the log file.
-    ///
-    /// Writes a json file with one line for every entry.
-    #[cfg_attr(feature = "bin", clap(short, long, default_value = "log.json"))]
-    pub log: PathBuf,
-    /// Path for the failure data.
-    ///
-    /// Every failed test gets a folder with stdout, stderr and other data to reproduce.
-    #[cfg_attr(feature = "bin", clap(long, default_value = "fails"))]
-    pub failures: PathBuf,
+    /// Various files are written into the output folder: The summary in csv and xml format,
+    /// the log and fail directories
+    #[cfg_attr(feature = "bin", clap(short, long, default_value = "."))]
+    pub output: PathBuf,
     /// A file with tests to run.
     #[cfg_attr(feature = "bin", clap(short, long))]
     pub tests: PathBuf,
@@ -152,6 +152,8 @@ pub struct TestResultData<'a> {
     pub result: TestResult,
     pub start: OffsetDateTime,
     pub duration: Duration,
+    /// PID of the deqp process that ran this test.
+    pub pid: Option<u32>,
     /// If a directory with data about the failure was created, the name of the directory.
     pub fail_dir: Option<String>,
 }
@@ -284,6 +286,7 @@ enum Job<'a> {
 
 struct RunDeqpState {
     logger: Logger,
+    pid: Option<u32>,
     timeout_duration: std::time::Duration,
     timeout: Sleep,
     stdout_reader: io::Lines<BufReader<ChildStdout>>,
@@ -310,7 +313,7 @@ struct RunTestListState<'a, 'list, S: Stream<Item = DeqpEvent>> {
     /// Input to the process that was last started.
     tests: &'list [&'a str],
     options: &'a RunOptions,
-    running: Option<S>,
+    running: Option<(Option<u32>, S)>,
     /// Index into current `tests` and start time.
     cur_test: Option<(usize, OffsetDateTime)>,
     last_finished: Option<usize>,
@@ -375,14 +378,18 @@ impl<'a> From<DeqpErrorWithOutput> for JobEvent<'a> {
 
 impl RunDeqpState {
     fn new(mut logger: Logger, timeout_duration: std::time::Duration, mut child: Child) -> Self {
-        if let Some(id) = child.id() {
+        let pid = child.id();
+        if let Some(id) = pid {
             logger = logger.new(o!("pid" => id));
+        } else {
+            warn!(logger, "Failed to gte child process pid");
         }
 
         let stdout = child.stdout.take().unwrap();
         let stderr = child.stderr.take().unwrap();
         Self {
             logger,
+            pid,
             timeout_duration,
             timeout: tokio::time::sleep(timeout_duration),
             stdout_reader: BufReader::new(stdout).lines(),
@@ -564,7 +571,7 @@ impl<'a, 'list, S: Stream<Item = DeqpEvent>> RunTestListState<'a, 'list, S> {
                     }
                     self.fail_dir = Some(dir_name);
                     // Write reproduce-list.txt
-                    match std::fs::File::create(new_dir.join("reproduce-list.txt")) {
+                    match std::fs::File::create(new_dir.join(TEST_LIST_FILE)) {
                         Ok(mut f) => {
                             if let Err(e) = (|| -> Result<(), std::io::Error> {
                                 // Write options
@@ -584,7 +591,7 @@ impl<'a, 'list, S: Stream<Item = DeqpEvent>> RunTestListState<'a, 'list, S> {
                                     self.options
                                         .args
                                         .iter()
-                                        .map(|a| { a.replace('\n', "\\n") })
+                                        .map(|a| a.replace('\n', "\\n"))
                                         .collect::<Vec<_>>()
                                         .join(" ")
                                 )?;
@@ -630,6 +637,7 @@ impl<'a, 'list, S: Stream<Item = DeqpEvent>> RunTestListState<'a, 'list, S> {
 
     fn get_missing(&self, count: usize) -> Vec<RunTestListEvent<'a, 'list>> {
         let start = self.last_finished.map(|i| i + 1).unwrap_or_default();
+        let pid = self.running.as_ref().and_then(|r| r.0);
         (0..count)
             .map(|i| {
                 RunTestListEvent::TestResult(ReproducibleTestResultData {
@@ -641,6 +649,7 @@ impl<'a, 'list, S: Stream<Item = DeqpEvent>> RunTestListState<'a, 'list, S> {
                         },
                         start: OffsetDateTime::now_utc(),
                         duration: Duration::new(0, 0),
+                        pid,
                         fail_dir: None,
                     },
                     run_list: &self.tests[..start + i + 1],
@@ -678,6 +687,7 @@ impl<'a, 'list, S: Stream<Item = DeqpEvent>> RunTestListState<'a, 'list, S> {
                     result,
                     start: cur_test.1,
                     duration,
+                    pid: self.running.as_ref().and_then(|r| r.0),
                     fail_dir: if is_failure {
                         self.fail_dir.clone()
                     } else {
@@ -707,6 +717,8 @@ impl<'a, 'list, S: Stream<Item = DeqpEvent>> RunTestListState<'a, 'list, S> {
 
         if let Some(cur_test) = self.cur_test {
             let duration = OffsetDateTime::now_utc() - cur_test.1;
+            // TODO Need to do that earlier, if the test times out
+            // TODO Also add a test for that
             if self.fail_dir.is_none() {
                 self.create_fail_dir(self.tests[cur_test.0]);
                 self.save_fail_dir_stderr(&stderr);
@@ -734,6 +746,7 @@ impl<'a, 'list, S: Stream<Item = DeqpEvent>> RunTestListState<'a, 'list, S> {
                     },
                     start: cur_test.1,
                     duration,
+                    pid: self.running.as_ref().and_then(|r| r.0),
                     fail_dir: self.fail_dir.clone(),
                 },
                 run_list,
@@ -961,12 +974,14 @@ pub fn parse_test_file(content: &str) -> Vec<&str> {
 /// Start a deqp process and parse the output.
 ///
 /// The started process gets killed on drop.
+///
+/// Returns the pid of the started process and a stream of events.
 pub fn run_deqp<S: AsRef<OsStr> + std::fmt::Debug>(
     logger: Logger,
     timeout_duration: std::time::Duration,
     args: &[S],
     env: &[(&str, &str)],
-) -> impl Stream<Item = DeqpEvent> {
+) -> (Option<u32>, impl Stream<Item = DeqpEvent>) {
     debug!(logger, "Start deqp"; "args" => ?args);
     let mut cmd = Command::new(&args[0]);
     cmd.args(&args[1..])
@@ -985,13 +1000,14 @@ pub fn run_deqp<S: AsRef<OsStr> + std::fmt::Debug>(
                     stdout: String::new(),
                     stderr: String::new(),
                 })));
-            return r;
+            return (None, r);
         }
     };
 
     let mut state = RunDeqpState::new(logger, timeout_duration, child);
+    let pid = state.pid;
 
-    Box::pin(gen!({
+    (pid, Box::pin(gen!({
         // Continue reading stdout and stderr even when the process exited
         loop {
             if state.has_timeout {
@@ -1064,7 +1080,7 @@ pub fn run_deqp<S: AsRef<OsStr> + std::fmt::Debug>(
                 yield_!(res);
             }
         }
-    }))
+    })))
 }
 
 /// Run a list of tests and restart the process with remaining tests if it crashed.
@@ -1095,7 +1111,7 @@ pub fn run_test_list<'a, 'list>(
                 state.running = Some(run_deqp(state.logger.clone(), options.timeout, &args, &[]));
             }
 
-            match state.running.as_mut().unwrap().next().await {
+            match state.running.as_mut().unwrap().1.next().await {
                 None => return,
                 Some(e) => match e {
                     DeqpEvent::TestStart { name } => {

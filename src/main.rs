@@ -1,4 +1,6 @@
-use anyhow::Result;
+use std::collections::HashMap;
+
+use anyhow::{bail, Result};
 use clap::Clap;
 use deqp_runner::*;
 use rand::seq::SliceRandom;
@@ -42,7 +44,10 @@ async fn real_main() -> Result<()> {
     };
 
     // Read test file
-    let test_file = tokio::fs::read_to_string(&options.tests).await?;
+    let test_file = match tokio::fs::read_to_string(&options.tests).await {
+        Ok(r) => r,
+        Err(e) => bail!("Failed to read test list file {:?}: {}", options.tests, e),
+    };
     let mut tests = parse_test_file(&test_file);
 
     if let Some(end) = options.end {
@@ -53,8 +58,18 @@ async fn real_main() -> Result<()> {
     }
 
     if options.shuffle {
+        // Tests within a batch should be in the same order as before
+        // Map test name to previous index
+        let name_to_index = tests
+            .iter()
+            .enumerate()
+            .map(|(i, n)| (*n, i))
+            .collect::<HashMap<_, _>>();
         let mut rng = thread_rng();
         tests.shuffle(&mut rng);
+        for c in tests.chunks_mut(BATCH_SIZE) {
+            c.sort_by_key(|n| name_to_index.get(n).unwrap());
+        }
     }
 
     if options.run_command.is_empty() {
@@ -73,7 +88,7 @@ async fn real_main() -> Result<()> {
         capture_dumps: true,
         timeout: std::time::Duration::from_secs(options.timeout.into()),
         max_failures: options.max_failures,
-        fail_dir: Some(options.failures),
+        fail_dir: Some(options.output.join(FAIL_DIR)),
     };
 
     let progress_bar = if !options.no_progress {
@@ -83,6 +98,7 @@ async fn real_main() -> Result<()> {
     };
 
     let job_count = options.jobs.unwrap_or_else(num_cpus::get);
+    let log_file = options.output.join(LOG_FILE);
     let mut summary = Summary::default();
     tokio::select! {
         _ = run_tests_parallel(
@@ -90,7 +106,7 @@ async fn real_main() -> Result<()> {
             &tests,
             &mut summary,
             &run_options,
-            Some(&options.log),
+            Some(&log_file),
             job_count,
             progress_bar,
         ) => {}
@@ -104,8 +120,8 @@ async fn real_main() -> Result<()> {
         &tests,
         &summary,
         run_options.fail_dir.as_deref(),
-        Some(&options.csv_summary),
-        Some(&options.xml_summary),
+        Some(&options.output.join(CSV_SUMMARY)),
+        Some(&options.output.join(XML_SUMMARY)),
     )?;
 
     Ok(())
