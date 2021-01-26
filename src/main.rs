@@ -1,6 +1,4 @@
-use std::collections::HashMap;
-
-use anyhow::{bail, Result};
+use anyhow::{bail, format_err, Result};
 use clap::Clap;
 use deqp_runner::*;
 use rand::seq::SliceRandom;
@@ -58,18 +56,24 @@ async fn real_main() -> Result<()> {
     }
 
     if options.shuffle {
-        // Tests within a batch should be in the same order as before
-        // Map test name to previous index
-        let name_to_index = tests
-            .iter()
-            .enumerate()
-            .map(|(i, n)| (*n, i))
-            .collect::<HashMap<_, _>>();
         let mut rng = thread_rng();
         tests.shuffle(&mut rng);
-        for c in tests.chunks_mut(BATCH_SIZE) {
-            c.sort_by_key(|n| name_to_index.get(n).unwrap());
+    }
+
+    let mut sorted_lists = Vec::new();
+    if !options.no_sort {
+        // Run batches through deqp to sort
+        for c in tests.chunks(BATCH_SIZE) {
+            sorted_lists.push(
+                sort_with_deqp(&logger, &options.run_command, c)
+                    .await
+                    .map_err(|e| format_err!("Failed to sort test list: {}", e))?,
+            );
         }
+        tests = sorted_lists
+            .iter()
+            .flat_map(|l| l.iter().map(|t| t.as_str()))
+            .collect();
     }
 
     if options.run_command.is_empty() {

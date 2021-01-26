@@ -85,6 +85,11 @@ pub struct Options {
     /// Hide progress bar.
     #[cfg_attr(feature = "bin", clap(short = 'p', long))]
     pub no_progress: bool,
+    /// Do not sort before running.
+    ///
+    /// Sorting also expands wildcards.
+    #[cfg_attr(feature = "bin", clap(long))]
+    pub no_sort: bool,
     /// Start of test range from test list.
     #[cfg_attr(feature = "bin", clap(long))]
     pub start: Option<usize>,
@@ -164,6 +169,20 @@ pub struct ReproducibleTestResultData<'a, 'list> {
     /// The last test in this list is the one the test result is about.
     pub run_list: &'list [&'a str],
     pub args: &'a [String],
+}
+
+#[derive(Debug, Error)]
+pub enum DeqpSortError {
+    #[error("Failed to create temporary file : {0}")]
+    TempFile(#[source] std::io::Error),
+    #[error("Failed to write into file: {0}")]
+    WriteFailed(#[source] std::io::Error),
+    #[error("Failed to spawn process: {0}")]
+    SpawnFailed(#[source] std::io::Error),
+    #[error("Failed to wait for process to end: {0}")]
+    WaitFailed(#[source] std::io::Error),
+    #[error("Failed to read output from process: {0}")]
+    ReadFailed(#[source] std::io::Error),
 }
 
 /// Failure when running `deqp`.
@@ -1027,6 +1046,63 @@ pub fn run_deqp<S: AsRef<OsStr> + std::fmt::Debug>(
     trace!(logger, "Run deqp"; "args" => ?args);
     let child = cmd.spawn().map_err(DeqpError::SpawnFailed)?;
     RunDeqpState::new(logger, timeout_duration, child)
+}
+
+/// Sort a list of tests into the order that deqp will run them in by running deqp with
+/// `--deqp-runmode=stdout-caselist`.
+///
+/// Deqp walks a trie and filters out all tests that match the given test expressions. The result
+/// list may be longer or shorter than the original list if *-expressions were used or names do not
+/// exist.
+pub async fn sort_with_deqp<'a, S: AsRef<OsStr>>(
+    logger: &Logger,
+    args: &[S],
+    tests: &[&'a str],
+) -> Result<Vec<String>, DeqpSortError> {
+    // Create a temporary file for the input test list
+    let mut temp_file = NamedTempFile::new().map_err(DeqpSortError::TempFile)?;
+    for t in tests {
+        writeln!(&mut temp_file, "{}", t).map_err(DeqpSortError::WriteFailed)?;
+    }
+
+    let mut args = args.iter().map(|s| s.as_ref()).collect::<Vec<_>>();
+    args.push(temp_file.path().as_os_str());
+    args.push("--deqp-runmode=stdout-caselist".as_ref());
+    trace!(logger, "Run deqp for sorting"; "args" => ?args);
+    let mut cmd = Command::new(&args[0]);
+    cmd.args(&args[1..])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    let mut child = cmd.spawn().map_err(DeqpSortError::SpawnFailed)?;
+    let mut stdout = BufReader::new(child.stdout.take().unwrap()).lines();
+
+    // Continue reading stdout and stderr even when the process exited
+    let mut stdout_finished = false;
+    let mut finished = false;
+    let mut res = Vec::new();
+    loop {
+        if stdout_finished && finished {
+            break;
+        }
+        tokio::select! {
+            l = stdout.next_line(), if !stdout_finished => {
+                let l = l.map_err(DeqpSortError::ReadFailed)?;
+                if let Some(l) = l {
+                    if let Some(t) = l.strip_prefix("TEST: ") {
+                        res.push(t.to_string());
+                    }
+                } else {
+                    stdout_finished = true;
+                }
+            }
+            r = child.wait(), if !finished => {
+                r.map_err(DeqpSortError::WaitFailed)?;
+                finished = true;
+            }
+        }
+    }
+    Ok(res)
 }
 
 impl Stream for RunDeqpState {
