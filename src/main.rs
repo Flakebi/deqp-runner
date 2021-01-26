@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use anyhow::{bail, format_err, Result};
 use clap::Clap;
 use deqp_runner::*;
@@ -61,14 +63,20 @@ async fn real_main() -> Result<()> {
     }
 
     let mut sorted_lists = Vec::new();
+    let mut missing = Vec::new();
     if !options.no_sort {
         // Run batches through deqp to sort
         for c in tests.chunks(BATCH_SIZE) {
-            sorted_lists.push(
-                sort_with_deqp(&logger, &options.run_command, c)
-                    .await
-                    .map_err(|e| format_err!("Failed to sort test list: {}", e))?,
-            );
+            let sorted = sort_with_deqp(&logger, &options.run_command, c)
+                .await
+                .map_err(|e| format_err!("Failed to sort test list: {}", e))?;
+            // Search missing tests
+            let mut orig = c.iter().copied().filter(|t| !t.contains('*')).collect::<HashSet<_>>();
+            for t in &sorted {
+                orig.remove(t.as_str());
+            }
+            missing.extend(orig.into_iter());
+            sorted_lists.push(sorted);
         }
         tests = sorted_lists
             .iter()
@@ -119,6 +127,15 @@ async fn real_main() -> Result<()> {
         }
     }
 
+    // Add filtered out missing tests
+    for t in missing {
+        summary.0.insert(t, (summary::SummaryEntry {
+            name: t,
+            result: TestResultType::Missing,
+            run_id: None,
+        }, None));
+    }
+
     summary::write_summary(
         &logger,
         &tests,
@@ -127,6 +144,34 @@ async fn real_main() -> Result<()> {
         Some(&options.output.join(CSV_SUMMARY)),
         Some(&options.output.join(XML_SUMMARY)),
     )?;
+
+    // Print stats
+    let mut total = 0;
+    let mut success = 0;
+    let mut not_supported = 0;
+    let mut fail = 0;
+    let mut crash = 0;
+    let mut timeout = 0;
+    let mut missing = 0;
+    let mut not_run = 0;
+    let mut flake = 0;
+    for s in summary.0.values() {
+        total += 1;
+        let r = &s.0.result;
+        match r {
+            TestResultType::NotSupported => not_supported += 1,
+            TestResultType::Crash => crash += 1,
+            TestResultType::Timeout => timeout += 1,
+            TestResultType::Missing => missing += 1,
+            TestResultType::NotRun => not_run += 1,
+            TestResultType::Flake(_) => flake +=1,
+            _ if r.is_failure() => fail += 1,
+            _ => success += 1,
+        }
+    }
+    info!(logger, "Tests finished"; "total" => total, "success" => success,
+        "not_supported" => not_supported, "fail" => fail, "crash" => crash, "timeout" => timeout,
+        "missing" => missing, "not_run" => not_run, "flake" => flake);
 
     Ok(())
 }
