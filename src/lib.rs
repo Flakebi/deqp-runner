@@ -1054,10 +1054,10 @@ pub fn run_deqp<S: AsRef<OsStr> + std::fmt::Debug>(
 /// Deqp walks a trie and filters out all tests that match the given test expressions. The result
 /// list may be longer or shorter than the original list if *-expressions were used or names do not
 /// exist.
-pub async fn sort_with_deqp<'a, S: AsRef<OsStr>>(
+pub async fn sort_with_deqp<S: AsRef<OsStr>>(
     logger: &Logger,
     args: &[S],
-    tests: &[&'a str],
+    tests: &[&str],
 ) -> Result<Vec<String>, DeqpSortError> {
     // Create a temporary file for the input test list
     let mut temp_file = NamedTempFile::new().map_err(DeqpSortError::TempFile)?;

@@ -71,7 +71,11 @@ async fn real_main() -> Result<()> {
                 .await
                 .map_err(|e| format_err!("Failed to sort test list: {}", e))?;
             // Search missing tests
-            let mut orig = c.iter().copied().filter(|t| !t.contains('*')).collect::<HashSet<_>>();
+            let mut orig = c
+                .iter()
+                .copied()
+                .filter(|t| !t.contains('*'))
+                .collect::<HashSet<_>>();
             for t in &sorted {
                 orig.remove(t.as_str());
             }
@@ -129,11 +133,17 @@ async fn real_main() -> Result<()> {
 
     // Add filtered out missing tests
     for t in missing {
-        summary.0.insert(t, (summary::SummaryEntry {
-            name: t,
-            result: TestResultType::Missing,
-            run_id: None,
-        }, None));
+        summary.0.insert(
+            t,
+            (
+                summary::SummaryEntry {
+                    name: t,
+                    result: TestResultType::Missing,
+                    run_id: None,
+                },
+                None,
+            ),
+        );
     }
 
     summary::write_summary(
@@ -164,7 +174,7 @@ async fn real_main() -> Result<()> {
             TestResultType::Timeout => timeout += 1,
             TestResultType::Missing => missing += 1,
             TestResultType::NotRun => not_run += 1,
-            TestResultType::Flake(_) => flake +=1,
+            TestResultType::Flake(_) => flake += 1,
             _ if r.is_failure() => fail += 1,
             _ => success += 1,
         }
