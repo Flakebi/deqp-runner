@@ -15,6 +15,8 @@ use genawaiter::sync::gen;
 use genawaiter::yield_;
 use indicatif::ProgressBar;
 use once_cell::sync::Lazy;
+use rand::seq::SliceRandom;
+use rand::thread_rng;
 use serde::{Deserialize, Serialize};
 use slog::{debug, error, info, o, trace, warn, Logger};
 use tempfile::NamedTempFile;
@@ -1024,6 +1026,22 @@ pub fn parse_test_file(content: &str) -> Vec<&str> {
         .collect()
 }
 
+/// Shuffle the list while retaining order inside a batch.
+pub fn shuffle_in_batches(tests: &mut [&str]) {
+    // Tests within a batch should be in the same order as before
+    // Map test name to previous index
+    let name_to_index = tests
+        .iter()
+        .enumerate()
+        .map(|(i, n)| (*n, i))
+        .collect::<HashMap<_, _>>();
+    let mut rng = thread_rng();
+    tests.shuffle(&mut rng);
+    for c in tests.chunks_mut(BATCH_SIZE) {
+        c.sort_by_key(|n| name_to_index.get(n).unwrap());
+    }
+}
+
 /// Start a deqp process and parse the output.
 ///
 /// The started process gets killed on drop.
@@ -1351,6 +1369,10 @@ pub async fn run_tests_parallel<'a>(
                                                     fails, crashes
                                                 ));
                                                 pb.tick();
+                                            } else {
+                                                info!(logger, "Test failed";
+                                                    "test" => res.data.name,
+                                                    "result" => ?res.data.result.variant);
                                             }
                                         }
                                         entry.insert((
@@ -1431,7 +1453,22 @@ mod tests {
         expected: &[(&str, TestResultType)],
         check: F,
     ) -> Result<()> {
+        // Read test file
+        let test_file = tokio::fs::read_to_string("logs/in").await?;
+        let tests = parse_test_file(&test_file);
+        assert_eq!(tests.len(), 18, "Test size does not match");
+
         let logger = create_logger();
+        check_tests_intern(&logger, args, expected, check, &tests).await
+    }
+
+    async fn check_tests_intern<F: for<'a> FnOnce(Summary<'a>)>(
+        logger: &Logger,
+        args: &[&str],
+        expected: &[(&str, TestResultType)],
+        check: F,
+        tests: &[&str],
+    ) -> Result<()> {
         let run_options = RunOptions {
             args: args.iter().map(|s| s.to_string()).collect(),
             capture_dumps: true,
@@ -1440,15 +1477,10 @@ mod tests {
             fail_dir: None,
         };
 
-        // Read test file
-        let test_file = tokio::fs::read_to_string("logs/in").await?;
-        let tests = parse_test_file(&test_file);
-        assert_eq!(tests.len(), 18, "Test size does not match");
-
         let mut summary = Summary::default();
         run_tests_parallel(
             &logger,
-            &tests,
+            tests,
             &mut summary,
             &run_options,
             None,
@@ -1675,6 +1707,96 @@ mod tests {
                 assert_eq!(res.1.as_ref().unwrap().fail_dir, None);
                 assert_eq!(res.0.run_id, Some(23));
             }
+        )
+        .await?;
+
+        Ok(())
+    }
+
+    fn test_sort_list() -> Vec<(String, TestResultType)> {
+        let mut expected = Vec::new();
+        for i in 0..(BATCH_SIZE * 5 - BATCH_SIZE / 3) {
+            expected.push((i.to_string(), TestResultType::Pass));
+        }
+        let mut rng = thread_rng();
+        expected.shuffle(&mut rng);
+        expected
+    }
+
+    #[tokio::test]
+    #[should_panic(expected = "Test result does not match for test")]
+    async fn test_sort_no_shuffle_no_sort() {
+        let expected = test_sort_list();
+        let expected = expected
+            .iter()
+            .map(|(s, r)| (s.as_str(), r.clone()))
+            .collect::<Vec<_>>();
+
+        let tests = expected.iter().map(|e| e.0).collect::<Vec<_>>();
+        let logger = create_logger();
+        let _ =
+            check_tests_intern(&logger, &["test/test-sorted.sh"], &expected, |_| {}, &tests).await;
+    }
+
+    #[tokio::test]
+    async fn test_sort_no_shuffle_sort() -> Result<()> {
+        let expected = test_sort_list();
+        let expected = expected
+            .iter()
+            .map(|(s, r)| (s.as_str(), r.clone()))
+            .collect::<Vec<_>>();
+
+        let tests = expected.iter().map(|e| e.0).collect::<Vec<_>>();
+        let logger = create_logger();
+        let sorted_list = sort_with_deqp(&logger, &["test/test-sorted.sh"], &tests).await?;
+        let sorted_tests = sorted_list.iter().map(|t| t.as_str()).collect::<Vec<_>>();
+        check_tests_intern(
+            &logger,
+            &["test/test-sorted.sh"],
+            &expected,
+            |_| {},
+            &sorted_tests,
+        )
+        .await?;
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[should_panic(expected = "Test result does not match for test")]
+    async fn test_sort_shuffle_no_sort() {
+        let expected = test_sort_list();
+        let expected = expected
+            .iter()
+            .map(|(s, r)| (s.as_str(), r.clone()))
+            .collect::<Vec<_>>();
+
+        let mut tests = expected.iter().map(|e| e.0).collect::<Vec<_>>();
+        let logger = create_logger();
+        shuffle_in_batches(&mut tests);
+        let _ =
+            check_tests_intern(&logger, &["test/test-sorted.sh"], &expected, |_| {}, &tests).await;
+    }
+
+    #[tokio::test]
+    async fn test_sort_shuffle_sort() -> Result<()> {
+        let expected = test_sort_list();
+        let expected = expected
+            .iter()
+            .map(|(s, r)| (s.as_str(), r.clone()))
+            .collect::<Vec<_>>();
+
+        let tests = expected.iter().map(|e| e.0).collect::<Vec<_>>();
+        let logger = create_logger();
+        let sorted_list = sort_with_deqp(&logger, &["test/test-sorted.sh"], &tests).await?;
+        let mut sorted_tests = sorted_list.iter().map(|t| t.as_str()).collect::<Vec<_>>();
+        shuffle_in_batches(&mut sorted_tests);
+        check_tests_intern(
+            &logger,
+            &["test/test-sorted.sh"],
+            &expected,
+            |_| {},
+            &sorted_tests,
         )
         .await?;
 

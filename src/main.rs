@@ -3,8 +3,6 @@ use std::collections::HashSet;
 use anyhow::{bail, format_err, Result};
 use clap::Clap;
 use deqp_runner::*;
-use rand::seq::SliceRandom;
-use rand::thread_rng;
 use slog::{info, o, Drain};
 
 #[tokio::main(flavor = "current_thread")]
@@ -57,35 +55,30 @@ async fn real_main() -> Result<()> {
         tests.drain(..std::cmp::min(start, tests.len()));
     }
 
-    if options.shuffle {
-        let mut rng = thread_rng();
-        tests.shuffle(&mut rng);
+    let sorted_list;
+    let missing: Vec<_>;
+    if !options.no_sort {
+        // Run through deqp to sort
+        sorted_list = sort_with_deqp(&logger, &options.run_command, &tests)
+            .await
+            .map_err(|e| format_err!("Failed to sort test list: {}", e))?;
+        // Search missing tests
+        let mut orig = tests
+            .iter()
+            .copied()
+            .filter(|t| !t.contains('*'))
+            .collect::<HashSet<_>>();
+        for t in &sorted_list {
+            orig.remove(t.as_str());
+        }
+        missing = orig.into_iter().collect();
+        tests = sorted_list.iter().map(|t| t.as_str()).collect();
+    } else {
+        missing = Vec::new();
     }
 
-    let mut sorted_lists = Vec::new();
-    let mut missing = Vec::new();
-    if !options.no_sort {
-        // Run batches through deqp to sort
-        for c in tests.chunks(BATCH_SIZE) {
-            let sorted = sort_with_deqp(&logger, &options.run_command, c)
-                .await
-                .map_err(|e| format_err!("Failed to sort test list: {}", e))?;
-            // Search missing tests
-            let mut orig = c
-                .iter()
-                .copied()
-                .filter(|t| !t.contains('*'))
-                .collect::<HashSet<_>>();
-            for t in &sorted {
-                orig.remove(t.as_str());
-            }
-            missing.extend(orig.into_iter());
-            sorted_lists.push(sorted);
-        }
-        tests = sorted_lists
-            .iter()
-            .flat_map(|l| l.iter().map(|t| t.as_str()))
-            .collect();
+    if options.shuffle {
+        shuffle_in_batches(&mut tests);
     }
 
     if options.run_command.is_empty() {
