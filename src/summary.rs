@@ -244,7 +244,7 @@ mod tests {
         println!("{:?}", report);
         assert_eq!(count, 1, "Test case count does not match");
         let test = &report.testsuites()[0].testcases[0];
-        assert_eq!(test.name, "");
+        assert_eq!(test.name, "aborted");
         assert!(test.is_error());
 
         Ok(())
