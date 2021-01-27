@@ -156,7 +156,7 @@ async fn real_main() -> Result<()> {
     let mut crash = 0;
     let mut timeout = 0;
     let mut missing = 0;
-    let mut not_run = 0;
+    let mut not_run = tests.len() - summary.0.len();
     let mut flake = 0;
     for s in summary.0.values() {
         total += 1;
