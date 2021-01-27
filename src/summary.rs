@@ -171,7 +171,7 @@ pub fn create_xml_summary<'a>(
 
     if has_not_run > 0 {
         ts = ts.add_testcase(TestCase::error(
-            "",
+            "aborted",
             junit_report::Duration::seconds(0),
             "NotRun",
             &format!("{} test cases were not run", has_not_run),
