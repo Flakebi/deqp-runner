@@ -1169,25 +1169,23 @@ impl Stream for RunDeqpState {
                     continue;
                 }
 
-                if !self.has_timeout {
-                    if let Poll::Ready(_) = self.timeout.poll_unpin(ctx) {
-                        debug!(self.logger, "Detected timeout");
-                        self.has_timeout = true;
-                        if self.has_fatal_error {
-                            self.finished_result = Some(Err(DeqpError::FatalError));
-                        } else {
-                            self.finished_result = Some(Err(DeqpError::Timeout));
-                        }
-                        // Kill deqp
-                        let logger = self.logger.clone();
-                        let mut child = self.child.take().unwrap();
-                        tokio::spawn(async move {
-                            if let Err(e) = child.kill().await {
-                                error!(logger, "Failed to kill deqp after timeout"; "error" => %e);
-                            }
-                        });
-                        return Poll::Ready(None);
+                if !self.has_timeout && self.timeout.poll_unpin(ctx).is_ready() {
+                    debug!(self.logger, "Detected timeout");
+                    self.has_timeout = true;
+                    if self.has_fatal_error {
+                        self.finished_result = Some(Err(DeqpError::FatalError));
+                    } else {
+                        self.finished_result = Some(Err(DeqpError::Timeout));
                     }
+                    // Kill deqp
+                    let logger = self.logger.clone();
+                    let mut child = self.child.take().unwrap();
+                    tokio::spawn(async move {
+                        if let Err(e) = child.kill().await {
+                            error!(logger, "Failed to kill deqp after timeout"; "error" => %e);
+                        }
+                    });
+                    return Poll::Ready(None);
                 }
             }
 
