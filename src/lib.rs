@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::process::Stdio;
 use std::task::{Context, Poll};
+use std::time::Instant;
 
 use futures::future::Either;
 use futures::prelude::*;
@@ -50,6 +51,8 @@ pub const FAIL_DIR: &str = "fails";
 pub const UNKNOWN_TEST_NAME: &str = "unknown";
 /// These many lines from stderr will be saved in the junit xml result file.
 const LAST_STDERR_LINES: usize = 5;
+/// How often to print progress messages when no progress bar is displayed.
+const UPDATE_PROGRESS_INTERVAL: std::time::Duration = std::time::Duration::from_secs(10);
 
 static RESULT_VARIANTS: Lazy<HashMap<&str, TestResultType>> = Lazy::new(|| {
     let mut result_variants = HashMap::new();
@@ -1262,6 +1265,24 @@ pub fn run_test_list<'a, 'list>(
     })
 }
 
+fn print_progress(
+    logger: &Logger,
+    start: Instant,
+    last_progress_print: &mut Instant,
+    finished: u64,
+    total: u64,
+) {
+    let now = Instant::now();
+    if now.duration_since(*last_progress_print) > UPDATE_PROGRESS_INTERVAL {
+        let eta_secs =
+            now.duration_since(start).as_secs_f32() / finished as f32 * (total - finished) as f32;
+        let eta = std::time::Duration::from_secs_f32(eta_secs);
+        info!(logger, "Progress update"; "finished_jobs" => finished, "total_jobs" => total,
+            "eta" => ?eta);
+        *last_progress_print = now;
+    }
+}
+
 pub async fn run_tests_parallel<'a>(
     logger: &'a Logger,
     tests: &'a [&'a str],
@@ -1285,6 +1306,9 @@ pub async fn run_tests_parallel<'a>(
     if let Some(pb) = progress_bar {
         pb.set_length(pending_jobs.len() as u64);
     }
+    // For logging progress when there is no progress bar
+    let start_instant = Instant::now();
+    let mut last_progress_print = Instant::now();
 
     let mut fails = 0;
     let mut crashes = 0;
@@ -1325,6 +1349,14 @@ pub async fn run_tests_parallel<'a>(
                 if let Some(pb) = progress_bar {
                     pb.inc(1);
                     debug_assert_eq!(pb.position(), job_id - job_executor.len() as u64);
+                } else {
+                    print_progress(
+                        &logger,
+                        start_instant,
+                        &mut last_progress_print,
+                        job_id - job_executor.len() as u64,
+                        job_id + pending_jobs.len() as u64,
+                    );
                 }
             }
             Some((Some(event), job_stream)) => {
@@ -1409,6 +1441,14 @@ pub async fn run_tests_parallel<'a>(
                         pending_jobs.push_back(job);
                         if let Some(pb) = progress_bar {
                             pb.inc_length(1);
+                        } else {
+                            print_progress(
+                                &logger,
+                                start_instant,
+                                &mut last_progress_print,
+                                job_id - job_executor.len() as u64,
+                                job_id + pending_jobs.len() as u64,
+                            );
                         }
                     }
                 }
