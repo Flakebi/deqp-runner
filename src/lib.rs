@@ -360,7 +360,10 @@ impl DeqpError {
 impl TestResultType {
     /// If the test result is a failure and the test should be retested.
     pub fn is_failure(&self) -> bool {
-        matches!(self, Self::Fail | Self::Crash | Self::Timeout | Self::Flake(_))
+        matches!(
+            self,
+            Self::Fail | Self::Crash | Self::Timeout | Self::Flake(_)
+        )
     }
 
     /// Merges the result with a new result and marks it as flake if necessary.
@@ -741,6 +744,7 @@ impl<'a, 'list> RunTestListState<'a, 'list> {
             "stdout" => &state.stdout, "stderr" => &state.stderr);
 
         let mut is_failure = true;
+        let pid = state.pid;
         let res = if let Some(cur_test) = self.cur_test {
             let duration = OffsetDateTime::now_utc() - cur_test.1;
             self.create_fail_dir(self.tests[cur_test.0]);
@@ -788,11 +792,10 @@ impl<'a, 'list> RunTestListState<'a, 'list> {
                 }
             }
             res
-        } else if let Some(e) = state
-            .finished_result
-            .map(Result::err)
-            .unwrap_or_else(|| Some(DeqpError::FatalError))
-        {
+        } else if let Some(e) = state.finished_result.map(Result::err).unwrap_or_else(|| {
+            error!(self.logger, "Process result is not set, aborting"; "pid" => pid);
+            Some(DeqpError::FatalError)
+        }) {
             if let Some(last_finished) = self.last_finished {
                 self.create_fail_dir(self.tests[last_finished]);
                 // No current test executed, so probably some tests are failing, therefore the exit
@@ -1244,7 +1247,6 @@ pub fn run_test_list<'a, 'list>(
                     for r in state.handle_finished(running) {
                         yield_!(r);
                     }
-                    return;
                 }
                 Some(e) => match e {
                     DeqpEvent::TestStart { name } => {
@@ -1452,6 +1454,7 @@ pub async fn run_tests_parallel<'a>(
                 }
 
                 if fatal_error {
+                    info!(logger, "A fatal error occured, aborting all pending jobs");
                     pending_jobs.clear();
                     job_executor = stream::FuturesUnordered::new();
                 } else {
@@ -1609,6 +1612,8 @@ mod tests {
             ("dEQP-VK.tessellation.primitive_discard.triangles_fractional_even_spacing_ccw_point_mode", TestResultType::Pass),
             ("dEQP-VK.tessellation.primitive_discard.triangles_fractional_even_spacing_cw", TestResultType::Pass),
             ("dEQP-VK.tessellation.primitive_discard.triangles_fractional_even_spacing_cw_point_mode", TestResultType::Crash),
+            ("dEQP-VK.fragment_shader_interlock.basic.discard.ssbo.shading_rate_unordered.4xaa.sample_shading.512x512", TestResultType::Missing),
+            ("dEQP-VK.fragment_shader_interlock.basic.discard.ssbo.shading_rate_unordered.4xaa.sample_shading.1024x1024", TestResultType::Missing),
         ];
 
         check_tests(
@@ -1734,6 +1739,8 @@ mod tests {
             ("dEQP-VK.tessellation.primitive_discard.triangles_fractional_even_spacing_ccw_point_mode", TestResultType::Pass),
             ("dEQP-VK.tessellation.primitive_discard.triangles_fractional_even_spacing_cw", TestResultType::Pass),
             ("dEQP-VK.tessellation.primitive_discard.triangles_fractional_even_spacing_cw_point_mode", TestResultType::Crash),
+            ("dEQP-VK.fragment_shader_interlock.basic.discard.ssbo.shading_rate_unordered.4xaa.sample_shading.512x512", TestResultType::NotSupported),
+            ("dEQP-VK.fragment_shader_interlock.basic.discard.ssbo.shading_rate_unordered.4xaa.sample_shading.1024x1024", TestResultType::NotSupported),
         ];
 
         check_tests_with_summary(
@@ -1743,7 +1750,7 @@ mod tests {
                 // TODO Check bisection result with get_test_results returned by check_tests
                 let res = summary.0.get("dEQP-VK.tessellation.primitive_discard.triangles_fractional_even_spacing_cw_point_mode").unwrap();
                 assert_eq!(res.1.as_ref().unwrap().fail_dir, None);
-                assert_eq!(res.0.run_id, Some(23));
+                assert_eq!(res.0.run_id, Some(25));
             }
         )
         .await?;
