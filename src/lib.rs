@@ -1327,6 +1327,8 @@ pub async fn run_tests_parallel<'a>(
 
     loop {
         if options.max_failures != 0 && fails + crashes >= options.max_failures {
+            warn!(logger, "The number of failures is high, skip remaining jobs";
+                "max_failures" => options.max_failures, "failures" => fails + crashes);
             // Do not start new jobs when we have our max number of failures
             pending_jobs.clear();
         }
