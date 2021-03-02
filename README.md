@@ -39,6 +39,19 @@ deqp-runner -t testlist.txt \
 	--deqp-caselist-file
 ```
 
+## Output
+`deqp-runner` produces a number of output files to collect results and help finding driver issues.
+
+- `summary.csv` contains the result for every test.
+- `summary.xml` contains failures and flakes in the junit xml format for consumption by CI systems
+  like Jenkins.
+- `log.json` is written while running. It contains a line for every run test, connecting it with the
+  PID of `deqp-vk`, and timestamp and a failure directory containing more information. Tests that
+  are run multiple times because they are flaky are listed multiple times.
+- `fails` contains one directory for every `deqp-vk` invocation that had failures. Every failure
+  subdir contains the list of tests that were run for easy reproducibility and stderr of `deqp-vk`.
+  `log.json` references failure subdirs for failed tests.
+
 ## Build
 Install [Rust](https://rust-lang.org) (preferred installation method is [rustup](https://rustup.rs))
 and build with `cargo build --release`.
