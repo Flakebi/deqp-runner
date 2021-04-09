@@ -1392,7 +1392,7 @@ pub async fn run_tests_parallel<'a>(
                                         let new = res.data.result.variant.clone();
                                         let (result, take_new) = old.merge(new);
                                         entry.get_mut().0 = summary::SummaryEntry {
-                                            name: res.data.name,
+                                            name: Cow::Borrowed(res.data.name),
                                             result,
                                             run_id: if take_new { Some(res.id) } else { old_id },
                                         };
@@ -1426,7 +1426,7 @@ pub async fn run_tests_parallel<'a>(
                                         }
                                         entry.insert((
                                             summary::SummaryEntry {
-                                                name: res.data.name,
+                                                name: Cow::Borrowed(res.data.name),
                                                 result: res.data.result.variant.clone(),
                                                 run_id: Some(res.id),
                                             },

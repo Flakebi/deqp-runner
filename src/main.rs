@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::collections::HashSet;
 
 use anyhow::{bail, format_err, Result};
@@ -130,7 +131,7 @@ async fn real_main() -> Result<()> {
             t,
             (
                 summary::SummaryEntry {
-                    name: t,
+                    name: Cow::Borrowed(t),
                     result: TestResultType::Missing,
                     run_id: None,
                 },

@@ -31,7 +31,7 @@ pub enum WriteSummaryError {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct SummaryEntry<'a> {
     /// Name of the deqp test.
-    pub name: &'a str,
+    pub name: Cow<'a, str>,
     pub result: TestResultType,
     /// Reference into the run log.
     ///
@@ -58,7 +58,7 @@ pub fn write_summary<'a>(
                 .map(|r| Cow::Borrowed(&r.0))
                 .unwrap_or_else(|| {
                     Cow::Owned(SummaryEntry {
-                        name: t,
+                        name: Cow::Borrowed(t),
                         result: TestResultType::NotRun,
                         run_id: None,
                     })
