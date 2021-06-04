@@ -99,6 +99,7 @@ async fn real_main() -> Result<()> {
         timeout: std::time::Duration::from_secs(options.timeout.into()),
         max_failures: options.max_failures,
         fail_dir: Some(options.output.join(FAIL_DIR)),
+        retry: !options.no_retry,
     };
 
     let progress_bar = if !options.no_progress {

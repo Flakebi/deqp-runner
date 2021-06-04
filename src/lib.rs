@@ -87,6 +87,9 @@ pub struct Options {
     /// This can uncover bugs that are not detected normally.
     #[cfg_attr(feature = "bin", clap(long))]
     pub shuffle: bool,
+    /// Do not retry failing tests to find flakes.
+    #[cfg_attr(feature = "bin", clap(long))]
+    pub no_retry: bool,
     /// Hide progress bar.
     #[cfg_attr(feature = "bin", clap(short = 'p', long))]
     pub no_progress: bool,
@@ -249,6 +252,7 @@ pub struct RunOptions {
     pub max_failures: usize,
     /// Directory where failure dumps should be created.
     pub fail_dir: Option<PathBuf>,
+    pub retry: bool,
 }
 
 #[derive(Debug)]
@@ -472,7 +476,7 @@ impl RunDeqpState {
                     self.timeout = tokio::time::sleep(self.timeout_duration);
                     return Some(DeqpEvent::TestEnd {
                         result: TestResult {
-                            stdout: mem::replace(&mut self.stdout, String::new()),
+                            stdout: mem::take(&mut self.stdout),
                             variant: res.clone(),
                         },
                     });
@@ -652,7 +656,7 @@ impl<'a, 'list> RunTestListState<'a, 'list> {
         if let Some(running) = &mut self.running {
             if !running.stderr.is_empty() {
                 // Save current stderr
-                let stderr = mem::replace(&mut running.stderr, String::new());
+                let stderr = mem::take(&mut running.stderr);
                 self.save_fail_dir_stderr(&stderr);
             }
         }
@@ -879,7 +883,7 @@ impl<'a> Job<'a> {
                                 let is_failure = res.data.result.variant.is_failure();
                                 let entry = res.data.into();
                                 // Start second run for failed tests
-                                if is_failure {
+                                if is_failure && options.retry {
                                     let new_job =
                                         JobEvent::NewJob(Job::SecondRun { list: res.run_list });
                                     Either::Left(stream::iter(vec![entry, new_job]))
@@ -1520,7 +1524,7 @@ mod tests {
         assert_eq!(tests.len(), 18, "Test size does not match");
 
         let logger = create_logger();
-        check_tests_intern(&logger, args, expected, check, &tests).await
+        check_tests_intern(&logger, args, expected, check, &tests, true).await
     }
 
     async fn check_tests_intern<F: for<'a> FnOnce(Summary<'a>)>(
@@ -1529,6 +1533,7 @@ mod tests {
         expected: &[(&str, TestResultType)],
         check: F,
         tests: &[&str],
+        retry: bool,
     ) -> Result<()> {
         let run_options = RunOptions {
             args: args.iter().map(|s| s.to_string()).collect(),
@@ -1536,6 +1541,7 @@ mod tests {
             timeout: std::time::Duration::from_secs(2),
             max_failures: 0,
             fail_dir: None,
+            retry,
         };
 
         let mut summary = Summary::default();
@@ -1800,8 +1806,15 @@ mod tests {
 
         let tests = expected.iter().map(|e| e.0).collect::<Vec<_>>();
         let logger = create_logger();
-        let _ =
-            check_tests_intern(&logger, &["test/test-sorted.sh"], &expected, |_| {}, &tests).await;
+        let _ = check_tests_intern(
+            &logger,
+            &["test/test-sorted.sh"],
+            &expected,
+            |_| {},
+            &tests,
+            true,
+        )
+        .await;
     }
 
     #[tokio::test]
@@ -1822,6 +1835,7 @@ mod tests {
             &expected,
             |_| {},
             &sorted_tests,
+            true,
         )
         .await?;
 
@@ -1840,8 +1854,15 @@ mod tests {
         let mut tests = expected.iter().map(|e| e.0).collect::<Vec<_>>();
         let logger = create_logger();
         shuffle_in_batches(&mut tests);
-        let _ =
-            check_tests_intern(&logger, &["test/test-sorted.sh"], &expected, |_| {}, &tests).await;
+        let _ = check_tests_intern(
+            &logger,
+            &["test/test-sorted.sh"],
+            &expected,
+            |_| {},
+            &tests,
+            true,
+        )
+        .await;
     }
 
     #[tokio::test]
@@ -1863,6 +1884,52 @@ mod tests {
             &expected,
             |_| {},
             &sorted_tests,
+            true,
+        )
+        .await?;
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_no_retry() -> Result<()> {
+        let logger = create_logger();
+        let test_file = tokio::fs::read_to_string("logs/in").await?;
+        let tests = parse_test_file(&test_file);
+        assert_eq!(tests.len(), 18, "Test size does not match");
+
+        let expected = vec![
+            ("dEQP-VK.tessellation.primitive_discard.triangles_equal_spacing_ccw", TestResultType::Pass),
+            ("dEQP-VK.tessellation.primitive_discard.triangles_equal_spacing_ccw_point_mode", TestResultType::Pass),
+            ("dEQP-VK.tessellation.primitive_discard.triangles_equal_spacing_cw", TestResultType::Pass),
+            ("dEQP-VK.tessellation.primitive_discard.triangles_equal_spacing_cw_point_mode", TestResultType::Pass),
+            ("dEQP-VK.tessellation.primitive_discard.triangles_fractional_odd_spacing_ccw_valid_levels", TestResultType::Pass),
+            ("dEQP-VK.tessellation.primitive_discard.triangles_fractional_odd_spacing_ccw", TestResultType::Pass),
+            ("dEQP-VK.tessellation.primitive_discard.triangles_fractional_odd_spacing_ccw_point_mode_valid_levels", TestResultType::Pass),
+            ("dEQP-VK.tessellation.primitive_discard.triangles_fractional_odd_spacing_ccw_point_mode", TestResultType::Pass),
+            ("dEQP-VK.tessellation.primitive_discard.triangles_fractional_odd_spacing_cw_valid_levels", TestResultType::Pass),
+            ("dEQP-VK.tessellation.primitive_discard.triangles_fractional_odd_spacing_cw", TestResultType::Pass),
+            ("dEQP-VK.tessellation.primitive_discard.triangles_fractional_odd_spacing_cw_point_mode_valid_levels", TestResultType::Pass),
+            ("dEQP-VK.tessellation.primitive_discard.triangles_fractional_odd_spacing_cw_point_mode", TestResultType::Pass),
+            ("dEQP-VK.tessellation.primitive_discard.triangles_fractional_even_spacing_ccw", TestResultType::Pass),
+            ("dEQP-VK.tessellation.primitive_discard.triangles_fractional_even_spacing_ccw_point_mode", TestResultType::Pass),
+            ("dEQP-VK.tessellation.primitive_discard.triangles_fractional_even_spacing_cw", TestResultType::Pass),
+            ("dEQP-VK.tessellation.primitive_discard.triangles_fractional_even_spacing_cw_point_mode", TestResultType::Crash),
+            ("dEQP-VK.fragment_shader_interlock.basic.discard.ssbo.shading_rate_unordered.4xaa.sample_shading.512x512", TestResultType::Missing),
+            ("dEQP-VK.fragment_shader_interlock.basic.discard.ssbo.shading_rate_unordered.4xaa.sample_shading.1024x1024", TestResultType::Missing),
+        ];
+
+        check_tests_intern(
+            &logger,
+            &["test/test-runner.sh", "logs/d", "/dev/null", "0"],
+            &expected,
+            |summary| {
+                let res = summary.0.get("dEQP-VK.tessellation.primitive_discard.triangles_fractional_even_spacing_cw_point_mode").unwrap();
+                assert_eq!(res.1.as_ref().unwrap().fail_dir, None);
+                assert_eq!(res.0.run_id, Some(15));
+            },
+            &tests,
+            false,
         )
         .await?;
 

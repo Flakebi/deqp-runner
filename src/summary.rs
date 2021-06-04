@@ -197,6 +197,7 @@ mod tests {
             timeout: std::time::Duration::from_secs(2),
             max_failures: 0,
             fail_dir: None,
+            retry: true,
         };
 
         // Read test file
