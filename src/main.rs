@@ -2,7 +2,7 @@ use std::borrow::Cow;
 use std::collections::HashSet;
 
 use anyhow::{bail, format_err, Result};
-use clap::Clap;
+use clap::Parser;
 use deqp_runner::*;
 use slog::{info, o, Drain};
 

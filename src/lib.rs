@@ -75,7 +75,7 @@ pub static PROGRESS_BAR: Lazy<ProgressBar> = Lazy::new(|| {
 });
 
 #[derive(Clone, Debug)]
-#[cfg_attr(feature = "bin", derive(clap::Clap))]
+#[cfg_attr(feature = "bin", derive(clap::Parser))]
 #[cfg_attr(feature = "bin", clap(version = clap::crate_version!(), author = clap::crate_authors!(),
     about = clap::crate_description!()))]
 pub struct Options {
@@ -1420,7 +1420,7 @@ pub async fn run_tests_parallel<'a>(
                                                     res.data.name, res.data.result.variant
                                                 ));
                                                 // Show fails and crashes on progress bar
-                                                pb.set_message(&format!(
+                                                pb.set_message(format!(
                                                     "; fails: {}, crashes: {}",
                                                     fails, crashes
                                                 ));

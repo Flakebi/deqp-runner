@@ -90,27 +90,30 @@ pub fn create_xml_summary<'a>(
 
     // Write only failures
     let mut has_not_run = 0;
-    let mut ts = junit_report::TestSuite::new("CTS").add_testcases(tests.iter().filter_map(|t| {
+    let mut ts = junit_report::TestSuite::new("CTS");
+    ts.add_testcases(tests.iter().filter_map(|t| {
         if let Some(entry) = summary.0.get(t) {
             if entry.0.result.is_failure() || matches!(entry.0.result, TestResultType::Flake(_)) {
                 // Count flakes as success but report anyway
                 if let Some(run) = &entry.1 {
                     let mut test = if let TestResultType::Flake(res) = &entry.0.result {
-                        TestCase::success(
+                        let mut t = TestCase::success(
                             t,
                             junit_report::Duration::from_std(run.duration.try_into().unwrap())
                                 .unwrap(),
-                        )
-                        .set_system_out(&format!("{}\nFlake({:?})", run.result.stdout, res))
+                        );
+                        t.set_system_out(&format!("{}\nFlake({:?})", run.result.stdout, res));
+                        t
                     } else {
-                        TestCase::failure(
+                        let mut t = TestCase::failure(
                             t,
                             junit_report::Duration::from_std(run.duration.try_into().unwrap())
                                 .unwrap(),
                             &format!("{:?}", entry.0.result),
                             "",
-                        )
-                        .set_system_out(&run.result.stdout)
+                        );
+                        t.set_system_out(&run.result.stdout);
+                        t
                     };
 
                     // Read stderr from failure dir
@@ -142,7 +145,7 @@ pub fn create_xml_summary<'a>(
                                     }
                                     last_lines_str.push_str(&l);
                                 }
-                                test = test.set_system_err(&last_lines_str);
+                                test.set_system_err(&last_lines_str);
                             }
                             Err(e) => {
                                 warn!(logger, "Failed to open stderr file"; "path" => ?path,
@@ -170,7 +173,7 @@ pub fn create_xml_summary<'a>(
     }));
 
     if has_not_run > 0 {
-        ts = ts.add_testcase(TestCase::error(
+        ts.add_testcase(TestCase::error(
             "aborted",
             junit_report::Duration::seconds(0),
             "NotRun",
@@ -178,7 +181,9 @@ pub fn create_xml_summary<'a>(
         ));
     }
 
-    Ok(junit_report::Report::new().add_testsuite(ts))
+    let mut report = junit_report::Report::new();
+    report.add_testsuite(ts);
+    Ok(report)
 }
 
 #[cfg(test)]
