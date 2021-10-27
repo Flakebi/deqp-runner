@@ -493,7 +493,7 @@ impl RunDeqpState {
                 self.stdout.clear();
                 return Some(DeqpEvent::TestStart { name: l.into() });
             } else {
-                self.stdout.push_str(&l);
+                self.stdout.push_str(l);
                 self.stdout.push('\n');
             }
         } else if l == "DONE!" {
@@ -1375,7 +1375,7 @@ pub async fn run_tests_parallel<'a>(
                     debug_assert_eq!(pb.position(), job_id - job_executor.len() as u64);
                 } else {
                     print_progress(
-                        &logger,
+                        logger,
                         start_instant,
                         &mut last_progress_print,
                         job_id - job_executor.len() as u64,
@@ -1467,7 +1467,7 @@ pub async fn run_tests_parallel<'a>(
                             pb.inc_length(1);
                         } else {
                             print_progress(
-                                &logger,
+                                logger,
                                 start_instant,
                                 &mut last_progress_print,
                                 job_id - job_executor.len() as u64,
