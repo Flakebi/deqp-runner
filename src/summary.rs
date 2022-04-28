@@ -1,6 +1,5 @@
 use std::borrow::Cow;
 use std::collections::{HashMap, VecDeque};
-use std::convert::TryInto;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::path::Path;
@@ -97,18 +96,13 @@ pub fn create_xml_summary<'a>(
                 // Count flakes as success but report anyway
                 if let Some(run) = &entry.1 {
                     let mut test = if let TestResultType::Flake(res) = &entry.0.result {
-                        let mut t = TestCase::success(
-                            t,
-                            junit_report::Duration::from_std(run.duration.try_into().unwrap())
-                                .unwrap(),
-                        );
+                        let mut t = TestCase::success(t, run.duration);
                         t.set_system_out(&format!("{}\nFlake({:?})", run.result.stdout, res));
                         t
                     } else {
                         let mut t = TestCase::failure(
                             t,
-                            junit_report::Duration::from_std(run.duration.try_into().unwrap())
-                                .unwrap(),
+                            run.duration,
                             &format!("{:?}", entry.0.result),
                             "",
                         );

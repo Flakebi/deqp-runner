@@ -23,8 +23,7 @@ use slog::{debug, error, info, o, trace, warn, Logger};
 use tempfile::NamedTempFile;
 use thiserror::Error;
 use time::{Duration, OffsetDateTime};
-use tokio::io::{AsyncBufReadExt, BufReader};
-use tokio::prelude::*;
+use tokio::io::{self, AsyncBufReadExt, BufReader};
 use tokio::process::{Child, ChildStderr, ChildStdout, Command};
 use tokio::time::Sleep;
 
@@ -311,9 +310,9 @@ pub struct RunDeqpState {
     logger: Logger,
     pub pid: u32,
     timeout_duration: std::time::Duration,
-    timeout: Sleep,
-    stdout_reader: io::Lines<BufReader<ChildStdout>>,
-    stderr_reader: io::Lines<BufReader<ChildStderr>>,
+    timeout: Pin<Box<Sleep>>,
+    stdout_reader: Pin<Box<io::Lines<BufReader<ChildStdout>>>>,
+    stderr_reader: Pin<Box<io::Lines<BufReader<ChildStderr>>>>,
     /// Buffer for stdout
     pub stdout: String,
     /// Buffer for stderr
@@ -425,9 +424,9 @@ impl RunDeqpState {
             logger,
             pid,
             timeout_duration,
-            timeout: tokio::time::sleep(timeout_duration),
-            stdout_reader: BufReader::new(stdout).lines(),
-            stderr_reader: BufReader::new(stderr).lines(),
+            timeout: Box::pin(tokio::time::sleep(timeout_duration)),
+            stdout_reader: Box::pin(BufReader::new(stdout).lines()),
+            stderr_reader: Box::pin(BufReader::new(stderr).lines()),
             stdout: String::new(),
             stderr: String::new(),
             stdout_finished: false,
@@ -443,15 +442,15 @@ impl RunDeqpState {
 
     fn handle_stdout_line(
         &mut self,
-        l: Option<Result<String, std::io::Error>>,
+        l: Result<Option<String>, std::io::Error>,
     ) -> Option<DeqpEvent> {
         let l = match l {
-            None => {
+            Ok(None) => {
                 self.stdout_finished = true;
                 return None;
             }
-            Some(Ok(r)) => r,
-            Some(Err(e)) => {
+            Ok(Some(r)) => r,
+            Err(e) => {
                 self.stdout_finished = true;
                 debug!(self.logger, "Failed to read stdout of process"; "error" => %e);
                 return None;
@@ -473,7 +472,7 @@ impl RunDeqpState {
                         l = &l[1..l.len() - 1];
                     }
                     self.stdout.push_str(l);
-                    self.timeout = tokio::time::sleep(self.timeout_duration);
+                    self.timeout = Box::pin(tokio::time::sleep(self.timeout_duration));
                     return Some(DeqpEvent::TestEnd {
                         result: TestResult {
                             stdout: mem::take(&mut self.stdout),
@@ -506,14 +505,14 @@ impl RunDeqpState {
         None
     }
 
-    fn handle_stderr_line(&mut self, l: Option<Result<String, std::io::Error>>) {
+    fn handle_stderr_line(&mut self, l: Result<Option<String>, std::io::Error>) {
         let l = match l {
-            None => {
+            Ok(None) => {
                 self.stderr_finished = true;
                 return;
             }
-            Some(Ok(r)) => r,
-            Some(Err(e)) => {
+            Ok(Some(r)) => r,
+            Err(e) => {
                 self.stderr_finished = true;
                 debug!(self.logger, "Failed to read stderr of process"; "error" => %e);
                 return;
@@ -1158,7 +1157,7 @@ impl Stream for RunDeqpState {
         // Continue reading stdout and stderr even when the process exited
         loop {
             if !self.stdout_finished {
-                if let Poll::Ready(r) = self.stdout_reader.poll_next_unpin(ctx) {
+                if let Poll::Ready(r) = self.stdout_reader.as_mut().poll_next_line(ctx) {
                     if let Some(r) = self.handle_stdout_line(r) {
                         return Poll::Ready(Some(r));
                     } else {
@@ -1168,7 +1167,7 @@ impl Stream for RunDeqpState {
             }
 
             if !self.stderr_finished {
-                if let Poll::Ready(r) = self.stderr_reader.poll_next_unpin(ctx) {
+                if let Poll::Ready(r) = self.stderr_reader.as_mut().poll_next_line(ctx) {
                     self.handle_stderr_line(r);
                     continue;
                 }
@@ -1195,7 +1194,7 @@ impl Stream for RunDeqpState {
                     continue;
                 }
 
-                if !self.has_timeout && self.timeout.poll_unpin(ctx).is_ready() {
+                if !self.has_timeout && self.timeout.as_mut().poll(ctx).is_ready() {
                     debug!(self.logger, "Detected timeout");
                     self.has_timeout = true;
                     self.finished_result = Some(Err(DeqpError::Timeout));
