@@ -565,16 +565,14 @@ impl<'a, 'list> RunTestListState<'a, 'list> {
         // Create a temporary file for the test list
         let mut temp_file = NamedTempFile::new().map_err(|e| DeqpErrorWithOutput {
             error: DeqpError::StartError(format!(
-                "Failed to create temporary file for test list: {}",
-                e
+                "Failed to create temporary file for test list: {e}"
             )),
             stdout: String::new(),
         })?;
         for t in self.tests {
-            writeln!(&mut temp_file, "{}", t).map_err(|e| DeqpErrorWithOutput {
+            writeln!(&mut temp_file, "{t}").map_err(|e| DeqpErrorWithOutput {
                 error: DeqpError::StartError(format!(
-                    "Failed to write temporary file for test list: {}",
-                    e
+                    "Failed to write temporary file for test list: {e}"
                 )),
                 stdout: String::new(),
             })?;
@@ -609,7 +607,7 @@ impl<'a, 'list> RunTestListState<'a, 'list> {
                     let dir_name = if i == 0 {
                         failed_test.to_string()
                     } else {
-                        format!("{}-{}", failed_test, i)
+                        format!("{failed_test}-{i}")
                     };
                     let new_dir = dir.join(&dir_name);
                     if !new_dir.exists() {
@@ -647,7 +645,7 @@ impl<'a, 'list> RunTestListState<'a, 'list> {
 
                                     // Write tests
                                     for t in self.tests {
-                                        writeln!(&mut f, "{}", t)?;
+                                        writeln!(&mut f, "{t}")?;
                                     }
                                     Ok(())
                                 })() {
@@ -729,7 +727,7 @@ impl<'a, 'list> RunTestListState<'a, 'list> {
     fn handle_test_start(&mut self, name: &str) -> Vec<RunTestListEvent<'a, 'list>> {
         trace!(self.logger, "Test started"; "test" => name);
         let next_test = self.last_finished.map(|i| i + 1).unwrap_or_default();
-        if let Some(i) = (&self.tests[next_test..]).iter().position(|t| t == &name) {
+        if let Some(i) = self.tests[next_test..].iter().position(|t| t == &name) {
             self.cur_test = Some((next_test + i, OffsetDateTime::now_utc()));
             self.get_missing(i)
         } else {
@@ -1122,14 +1120,14 @@ pub async fn sort_with_deqp<S: AsRef<OsStr>>(
     // Create a temporary file for the input test list
     let mut temp_file = NamedTempFile::new().map_err(DeqpSortError::TempFile)?;
     for t in tests {
-        writeln!(&mut temp_file, "{}", t).map_err(DeqpSortError::WriteFailed)?;
+        writeln!(&mut temp_file, "{t}").map_err(DeqpSortError::WriteFailed)?;
     }
 
     let mut args = args.iter().map(|s| s.as_ref()).collect::<Vec<_>>();
     args.push(temp_file.path().as_os_str());
     args.push("--deqp-runmode=stdout-caselist".as_ref());
     trace!(logger, "Run deqp for sorting"; "args" => ?args);
-    let mut cmd = Command::new(&args[0]);
+    let mut cmd = Command::new(args[0]);
     cmd.args(&args[1..])
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -1445,8 +1443,7 @@ pub async fn run_tests_parallel<'a>(
                                                 ));
                                                 // Show fails and crashes on progress bar
                                                 pb.set_message(format!(
-                                                    "; fails: {}, crashes: {}",
-                                                    fails, crashes
+                                                    "; fails: {fails}, crashes: {crashes}"
                                                 ));
                                                 pb.tick();
                                             } else {
@@ -1572,7 +1569,7 @@ mod tests {
 
         let mut summary = Summary::default();
         run_tests_parallel(
-            &logger,
+            logger,
             tests,
             &mut summary,
             &run_options,
@@ -1589,7 +1586,7 @@ mod tests {
         );
         for (t, r) in expected {
             if let Some(r2) = summary.0.get(t) {
-                assert_eq!(r2.0.result, *r, "Test result does not match for test {}", t);
+                assert_eq!(r2.0.result, *r, "Test result does not match for test {t}");
             } else {
                 panic!("Test {} has no result but expected {:?}", t, r);
             }

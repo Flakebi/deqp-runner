@@ -39,9 +39,9 @@ pub struct SummaryEntry<'a> {
 }
 
 /// Write summary csv and xml file.
-pub fn write_summary<'a>(
+pub fn write_summary(
     logger: &Logger,
-    tests: &[&'a str],
+    tests: &[&str],
     summary: &Summary,
     fail_dir: Option<&Path>,
     csv_file: Option<&Path>,
@@ -79,9 +79,9 @@ pub fn write_summary<'a>(
     Ok(())
 }
 
-pub fn create_xml_summary<'a>(
+pub fn create_xml_summary(
     logger: &Logger,
-    tests: &[&'a str],
+    tests: &[&str],
     summary: &Summary,
     fail_dir: Option<&Path>,
 ) -> Result<junit_report::Report, WriteSummaryError> {
@@ -171,7 +171,7 @@ pub fn create_xml_summary<'a>(
             "aborted",
             junit_report::Duration::seconds(0),
             "NotRun",
-            &format!("{} test cases were not run", has_not_run),
+            &format!("{has_not_run} test cases were not run"),
         ));
     }
 
@@ -242,7 +242,7 @@ mod tests {
     async fn test_b() -> Result<()> {
         let report = check_tests(&["test/test-runner.sh", "logs/b", "logs/b-err", "1"]).await?;
         let count: usize = report.testsuites().iter().map(|s| s.testcases.len()).sum();
-        println!("{:?}", report);
+        println!("{report:?}");
         assert_eq!(count, 1, "Test case count does not match");
         let test = &report.testsuites()[0].testcases[0];
         assert_eq!(test.name, "aborted");
@@ -255,7 +255,7 @@ mod tests {
     async fn test_d() -> Result<()> {
         let report = check_tests(&["test/test-runner.sh", "logs/d", "/dev/null", "1"]).await?;
         let count: usize = report.testsuites().iter().map(|s| s.testcases.len()).sum();
-        println!("{:?}", report);
+        println!("{report:?}");
         assert_eq!(count, 2, "Test case count does not match");
         let test = &report.testsuites()[0].testcases[0];
         assert_eq!(test.name, "dEQP-VK.tessellation.primitive_discard.triangles_fractional_even_spacing_cw_point_mode");
@@ -268,7 +268,7 @@ mod tests {
     async fn test_d_fatal() -> Result<()> {
         let report = check_tests(&["test/test-runner.sh", "logs/d", "logs/d-err", "1"]).await?;
         let count: usize = report.testsuites().iter().map(|s| s.testcases.len()).sum();
-        println!("{:?}", report);
+        println!("{report:?}");
         assert_eq!(count, 2, "Test case count does not match");
         let test = &report.testsuites()[0].testcases[0];
         assert_eq!(test.name, "dEQP-VK.tessellation.primitive_discard.triangles_fractional_even_spacing_cw_point_mode");
@@ -281,7 +281,7 @@ mod tests {
     async fn test_timeout() -> Result<()> {
         let report = check_tests(&["test/test-timeout.sh", "logs/d", "/dev/null", "1"]).await?;
         let count: usize = report.testsuites().iter().map(|s| s.testcases.len()).sum();
-        println!("{:?}", report);
+        println!("{report:?}");
         assert_eq!(count, 2, "Test case count does not match");
         let test = &report.testsuites()[0].testcases[0];
         assert_eq!(test.name, "dEQP-VK.tessellation.primitive_discard.triangles_fractional_even_spacing_cw_point_mode");
@@ -296,7 +296,7 @@ mod tests {
             &["test/bisect-test-runner.sh", "dEQP-VK.tessellation.primitive_discard.triangles_fractional_odd_spacing_ccw_valid_levels", "logs/d", "/dev/null", "1", "logs/a", "dev/null", "0"],
         ).await?;
         let count: usize = report.testsuites().iter().map(|s| s.testcases.len()).sum();
-        println!("{:?}", report);
+        println!("{report:?}");
         assert_eq!(count, 1, "Test case count does not match");
         let test = &report.testsuites()[0].testcases[0];
         assert_eq!(test.name, "dEQP-VK.tessellation.primitive_discard.triangles_fractional_even_spacing_cw_point_mode");

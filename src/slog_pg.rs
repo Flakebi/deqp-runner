@@ -19,7 +19,7 @@ impl Decorator for ProgressBarDecorator {
         crate::PROGRESS_BAR.println(String::from_utf8(rec).map_err(|e| {
             std::io::Error::new(
                 std::io::ErrorKind::Other,
-                format!("Cannot convert log message to string: {}", e),
+                format!("Cannot convert log message to string: {e}"),
             )
         })?);
         Ok(())
