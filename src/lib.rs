@@ -71,9 +71,9 @@ static RESULT_VARIANTS: Lazy<HashMap<&str, TestResultType>> = Lazy::new(|| {
 pub static PROGRESS_BAR: Lazy<ProgressBar> = Lazy::new(|| {
     let bar = ProgressBar::new(1);
     bar.set_style(
-        indicatif::ProgressStyle::default_bar().template("{wide_bar} job {pos}/{len}{msg} ({eta})"),
+        indicatif::ProgressStyle::with_template("{wide_bar} job {pos}/{len}{msg} ({eta})").unwrap(),
     );
-    bar.enable_steady_tick(1000);
+    bar.enable_steady_tick(std::time::Duration::from_secs(1));
     bar
 });
 
