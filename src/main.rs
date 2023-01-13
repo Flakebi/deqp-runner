@@ -79,7 +79,7 @@ async fn real_main() -> Result<()> {
     }
 
     if options.shuffle {
-        shuffle_in_batches(&mut tests);
+        shuffle_in_batches(&mut tests, BATCH_SIZE);
     }
 
     if options.run_command.is_empty() {
@@ -100,6 +100,7 @@ async fn real_main() -> Result<()> {
         max_failures: options.max_failures,
         fail_dir: Some(options.output.join(FAIL_DIR)),
         retry: !options.no_retry,
+        batch_size: BATCH_SIZE,
     };
 
     let progress_bar = if !options.no_progress {
@@ -178,7 +179,7 @@ async fn real_main() -> Result<()> {
     }
     info!(logger, "Tests finished"; "total" => tests.len() + missing.len(), "success" => success,
         "not_supported" => not_supported, "fail" => fail, "crash" => crash, "timeout" => timeout,
-        "missing" => missing_count, "not_run" => not_run, "flake" => flake);
+        "missing" => missing_count, "not_found" => missing.len(), "not_run" => not_run, "flake" => flake);
 
     Ok(())
 }

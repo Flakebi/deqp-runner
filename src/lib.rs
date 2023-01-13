@@ -60,7 +60,11 @@ static RESULT_VARIANTS: Lazy<HashMap<&str, TestResultType>> = Lazy::new(|| {
     result_variants.insert("QualityWarning", TestResultType::QualityWarning);
     result_variants.insert("NotSupported", TestResultType::NotSupported);
     result_variants.insert("Fail", TestResultType::Fail);
+    result_variants.insert("ResourceError", TestResultType::ResourceError);
     result_variants.insert("InternalError", TestResultType::InternalError);
+    result_variants.insert("Crash", TestResultType::Crash);
+    result_variants.insert("Timeout", TestResultType::Timeout);
+    result_variants.insert("Waiver", TestResultType::Waiver);
     result_variants
 });
 
@@ -139,9 +143,11 @@ pub enum TestResultType {
     /// Counts as success
     NotSupported,
     Fail,
+    ResourceError,
     InternalError,
     Crash,
     Timeout,
+    Waiver,
     /// Test should be executed but was not found in the output.
     Missing,
     /// The test was not executed because a fatal error happened before and aborted the whole run.
@@ -190,6 +196,8 @@ pub enum DeqpSortError {
     WaitFailed(#[source] std::io::Error),
     #[error("Failed to read output from process: {0}")]
     ReadFailed(#[source] std::io::Error),
+    #[error("deqp exit code {0:?}; stdout: {1}; stderr: {2}")]
+    SortFailed(Option<i32>, String, String),
 }
 
 /// Failure when running `deqp`.
@@ -252,6 +260,7 @@ pub struct RunOptions {
     /// Directory where failure dumps should be created.
     pub fail_dir: Option<PathBuf>,
     pub retry: bool,
+    pub batch_size: usize,
 }
 
 #[derive(Debug)]
@@ -372,9 +381,14 @@ impl DeqpError {
 impl TestResultType {
     /// If the test result is a failure and the test should be retested.
     pub fn is_failure(&self) -> bool {
-        matches!(
+        !matches!(
             self,
-            Self::Fail | Self::Crash | Self::Timeout | Self::Flake(_)
+            Self::Pass
+                | Self::CompatibilityWarning
+                | Self::QualityWarning
+                | Self::NotSupported
+                | Self::Waiver
+                | Self::Flake(_)
         )
     }
 
@@ -1055,7 +1069,7 @@ pub fn parse_test_file(content: &str) -> Vec<&str> {
 }
 
 /// Shuffle the list while retaining order inside a batch.
-pub fn shuffle_in_batches(tests: &mut [&str]) {
+pub fn shuffle_in_batches(tests: &mut [&str], batch_size: usize) {
     // Tests within a batch should be in the same order as before
     // Map test name to previous index
     let name_to_index = tests
@@ -1065,7 +1079,7 @@ pub fn shuffle_in_batches(tests: &mut [&str]) {
         .collect::<HashMap<_, _>>();
     let mut rng = thread_rng();
     tests.shuffle(&mut rng);
-    for c in tests.chunks_mut(BATCH_SIZE) {
+    for c in tests.chunks_mut(batch_size) {
         c.sort_by_key(|n| name_to_index.get(n).unwrap());
     }
 }
@@ -1125,10 +1139,10 @@ pub async fn sort_with_deqp<S: AsRef<OsStr>>(
 
     // Continue reading stdout and stderr even when the process exited
     let mut stdout_finished = false;
-    let mut finished = false;
     let mut res = Vec::new();
+    let mut exit_code = None;
     loop {
-        if stdout_finished && finished {
+        if stdout_finished && exit_code.is_some() {
             break;
         }
         tokio::select! {
@@ -1142,11 +1156,22 @@ pub async fn sort_with_deqp<S: AsRef<OsStr>>(
                     stdout_finished = true;
                 }
             }
-            r = child.wait(), if !finished => {
-                r.map_err(DeqpSortError::WaitFailed)?;
-                finished = true;
+            r = child.wait(), if exit_code.is_none() => {
+                exit_code = Some(r.map_err(DeqpSortError::WaitFailed)?);
             }
         }
+    }
+    let exit_code = exit_code.unwrap();
+    if !exit_code.success() {
+        let r = child
+            .wait_with_output()
+            .await
+            .map_err(DeqpSortError::WaitFailed)?;
+        return Err(DeqpSortError::SortFailed(
+            exit_code.code(),
+            String::from_utf8_lossy(&r.stdout).into(),
+            String::from_utf8_lossy(&r.stderr).into(),
+        ));
     }
     Ok(res)
 }
@@ -1312,7 +1337,7 @@ pub async fn run_tests_parallel<'a>(
     progress_bar: Option<&ProgressBar>,
 ) {
     let mut pending_jobs: VecDeque<Job<'a>> = tests
-        .chunks(BATCH_SIZE)
+        .chunks(options.batch_size)
         .map(|list| Job::FirstRun { list })
         .collect();
 
@@ -1523,7 +1548,7 @@ mod tests {
         assert_eq!(tests.len(), 18, "Test size does not match");
 
         let logger = create_logger();
-        check_tests_intern(&logger, args, expected, check, &tests, true).await
+        check_tests_intern(&logger, args, expected, check, &tests, true, BATCH_SIZE).await
     }
 
     async fn check_tests_intern<F: for<'a> FnOnce(Summary<'a>)>(
@@ -1533,6 +1558,7 @@ mod tests {
         check: F,
         tests: &[&str],
         retry: bool,
+        batch_size: usize,
     ) -> Result<()> {
         let run_options = RunOptions {
             args: args.iter().map(|s| s.to_string()).collect(),
@@ -1541,6 +1567,7 @@ mod tests {
             max_failures: 0,
             fail_dir: None,
             retry,
+            batch_size,
         };
 
         let mut summary = Summary::default();
@@ -1784,9 +1811,9 @@ mod tests {
         Ok(())
     }
 
-    fn test_sort_list() -> Vec<(String, TestResultType)> {
+    fn test_sort_list(batch_size: usize) -> Vec<(String, TestResultType)> {
         let mut expected = Vec::new();
-        for i in 0..(BATCH_SIZE * 5 - BATCH_SIZE / 3) {
+        for i in 0..(batch_size * 5 - batch_size / 3) {
             expected.push((i.to_string(), TestResultType::Pass));
         }
         let mut rng = thread_rng();
@@ -1797,7 +1824,8 @@ mod tests {
     #[tokio::test]
     #[should_panic(expected = "Test result does not match for test")]
     async fn test_sort_no_shuffle_no_sort() {
-        let expected = test_sort_list();
+        let batch_size = 10;
+        let expected = test_sort_list(batch_size);
         let expected = expected
             .iter()
             .map(|(s, r)| (s.as_str(), r.clone()))
@@ -1812,13 +1840,15 @@ mod tests {
             |_| {},
             &tests,
             true,
+            batch_size,
         )
         .await;
     }
 
     #[tokio::test]
     async fn test_sort_no_shuffle_sort() -> Result<()> {
-        let expected = test_sort_list();
+        let batch_size = 10;
+        let expected = test_sort_list(batch_size);
         let expected = expected
             .iter()
             .map(|(s, r)| (s.as_str(), r.clone()))
@@ -1835,6 +1865,7 @@ mod tests {
             |_| {},
             &sorted_tests,
             true,
+            batch_size,
         )
         .await?;
 
@@ -1844,7 +1875,8 @@ mod tests {
     #[tokio::test]
     #[should_panic(expected = "Test result does not match for test")]
     async fn test_sort_shuffle_no_sort() {
-        let expected = test_sort_list();
+        let batch_size = 10;
+        let expected = test_sort_list(batch_size);
         let expected = expected
             .iter()
             .map(|(s, r)| (s.as_str(), r.clone()))
@@ -1852,7 +1884,7 @@ mod tests {
 
         let mut tests = expected.iter().map(|e| e.0).collect::<Vec<_>>();
         let logger = create_logger();
-        shuffle_in_batches(&mut tests);
+        shuffle_in_batches(&mut tests, batch_size);
         let _ = check_tests_intern(
             &logger,
             &["test/test-sorted.sh"],
@@ -1860,13 +1892,15 @@ mod tests {
             |_| {},
             &tests,
             true,
+            batch_size,
         )
         .await;
     }
 
     #[tokio::test]
     async fn test_sort_shuffle_sort() -> Result<()> {
-        let expected = test_sort_list();
+        let batch_size = 10;
+        let expected = test_sort_list(batch_size);
         let expected = expected
             .iter()
             .map(|(s, r)| (s.as_str(), r.clone()))
@@ -1876,7 +1910,7 @@ mod tests {
         let logger = create_logger();
         let sorted_list = sort_with_deqp(&logger, &["test/test-sorted.sh"], &tests).await?;
         let mut sorted_tests = sorted_list.iter().map(|t| t.as_str()).collect::<Vec<_>>();
-        shuffle_in_batches(&mut sorted_tests);
+        shuffle_in_batches(&mut sorted_tests, batch_size);
         check_tests_intern(
             &logger,
             &["test/test-sorted.sh"],
@@ -1884,6 +1918,7 @@ mod tests {
             |_| {},
             &sorted_tests,
             true,
+            batch_size,
         )
         .await?;
 
@@ -1929,6 +1964,7 @@ mod tests {
             },
             &tests,
             false,
+            BATCH_SIZE,
         )
         .await?;
 

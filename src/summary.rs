@@ -197,6 +197,7 @@ mod tests {
             max_failures: 0,
             fail_dir: None,
             retry: true,
+            batch_size: BATCH_SIZE,
         };
 
         // Read test file
