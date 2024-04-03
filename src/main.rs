@@ -25,7 +25,8 @@ async fn real_main() -> Result<()> {
     let progress_bar = if !options.no_progress {
         let bar = ProgressBar::new(1);
         bar.set_style(
-            indicatif::ProgressStyle::with_template("{wide_bar} job {pos}/{len}{msg} ({eta})").unwrap(),
+            indicatif::ProgressStyle::with_template("{wide_bar} test {pos}/{len}{msg} ({eta})")
+                .unwrap(),
         );
         bar.enable_steady_tick(std::time::Duration::from_secs(1));
         bar
