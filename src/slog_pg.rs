@@ -1,9 +1,12 @@
 //! A slog term decorator that prints log messages to a progress bar.
 
+use indicatif::ProgressBar;
 use slog::{OwnedKVList, Record};
 use slog_term::{Decorator, RecordDecorator};
 
-pub struct ProgressBarDecorator;
+pub struct ProgressBarDecorator {
+    pub progress_bar: ProgressBar,
+}
 
 struct ProgressBarRecordDecorator<'a>(&'a mut Vec<u8>);
 
@@ -16,12 +19,13 @@ impl Decorator for ProgressBarDecorator {
     ) -> std::io::Result<()> {
         let mut rec = Vec::new();
         f(&mut ProgressBarRecordDecorator(&mut rec))?;
-        crate::PROGRESS_BAR.println(String::from_utf8(rec).map_err(|e| {
-            std::io::Error::new(
-                std::io::ErrorKind::Other,
-                format!("Cannot convert log message to string: {e}"),
-            )
-        })?);
+        self.progress_bar
+            .println(String::from_utf8(rec).map_err(|e| {
+                std::io::Error::new(
+                    std::io::ErrorKind::Other,
+                    format!("Cannot convert log message to string: {e}"),
+                )
+            })?);
         Ok(())
     }
 }
