@@ -4,6 +4,7 @@ use std::collections::HashSet;
 use anyhow::{bail, format_err, Result};
 use clap::Parser;
 use deqp_runner::*;
+use indicatif::ProgressBar;
 use slog::{info, o, Drain};
 
 #[tokio::main(flavor = "current_thread")]
@@ -21,14 +22,23 @@ async fn real_main() -> Result<()> {
         std::env::set_var("RUST_LOG", "info");
     }
 
-    if !options.no_progress && PROGRESS_BAR.is_hidden() {
-        options.no_progress = true;
-    }
+    let progress_bar = if !options.no_progress {
+        let bar = ProgressBar::new(1);
+        bar.set_style(
+            indicatif::ProgressStyle::with_template("{wide_bar} job {pos}/{len}{msg} ({eta})").unwrap(),
+        );
+        bar.enable_steady_tick(std::time::Duration::from_secs(1));
+        bar
+    } else {
+        ProgressBar::hidden()
+    };
 
-    let logger = if !options.no_progress {
-        let drain = slog_term::FullFormat::new(deqp_runner::slog_pg::ProgressBarDecorator)
-            .build()
-            .fuse();
+    let logger = if !progress_bar.is_hidden() {
+        let drain = slog_term::FullFormat::new(deqp_runner::slog_pg::ProgressBarDecorator {
+            progress_bar: progress_bar.clone(),
+        })
+        .build()
+        .fuse();
         let drain = slog_envlogger::new(drain).fuse();
         let drain = slog_async::Async::new(drain).build().fuse();
 
@@ -103,12 +113,6 @@ async fn real_main() -> Result<()> {
         batch_size: BATCH_SIZE,
     };
 
-    let progress_bar = if !options.no_progress {
-        Some(&*PROGRESS_BAR)
-    } else {
-        None
-    };
-
     let job_count = options.jobs.unwrap_or_else(num_cpus::get);
     let log_file = options.output.join(LOG_FILE);
     let mut summary = Summary::default();
@@ -120,7 +124,7 @@ async fn real_main() -> Result<()> {
             &run_options,
             Some(&log_file),
             job_count,
-            progress_bar,
+            &progress_bar,
         ) => {}
         _ = tokio::signal::ctrl_c() => {
             info!(logger, "Killed by sigint");

@@ -206,6 +206,7 @@ mod tests {
         assert_eq!(tests.len(), 18, "Test size does not match");
 
         let mut summary = Summary::default();
+        let pb = ProgressBar::hidden();
         run_tests_parallel(
             &logger,
             &tests,
@@ -213,7 +214,7 @@ mod tests {
             &run_options,
             None,
             num_cpus::get(),
-            None,
+            &pb,
         )
         .await;
 

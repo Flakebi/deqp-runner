@@ -68,15 +68,6 @@ static RESULT_VARIANTS: Lazy<HashMap<&str, TestResultType>> = Lazy::new(|| {
     result_variants
 });
 
-pub static PROGRESS_BAR: Lazy<ProgressBar> = Lazy::new(|| {
-    let bar = ProgressBar::new(1);
-    bar.set_style(
-        indicatif::ProgressStyle::with_template("{wide_bar} job {pos}/{len}{msg} ({eta})").unwrap(),
-    );
-    bar.enable_steady_tick(std::time::Duration::from_secs(1));
-    bar
-});
-
 #[derive(Clone, Debug)]
 #[cfg_attr(feature = "bin", derive(clap::Parser))]
 #[cfg_attr(feature = "bin", clap(version = clap::crate_version!(), author = clap::crate_authors!(),
@@ -1332,7 +1323,7 @@ pub async fn run_tests_parallel<'a>(
     options: &'a RunOptions,
     log_file: Option<&'a Path>,
     job_count: usize,
-    progress_bar: Option<&ProgressBar>,
+    progress_bar: &ProgressBar,
 ) {
     let mut pending_jobs: VecDeque<Job<'a>> = tests
         .chunks(options.batch_size)
@@ -1344,9 +1335,7 @@ pub async fn run_tests_parallel<'a>(
     // The total number of jobs added to the executor
     let mut job_id: u64 = 0;
     let mut log_entry_id: u64 = 0;
-    if let Some(pb) = progress_bar {
-        pb.set_length(pending_jobs.len() as u64);
-    }
+    progress_bar.set_length(pending_jobs.len() as u64);
     // For logging progress when there is no progress bar
     let start_instant = Instant::now();
     let mut last_progress_print = Instant::now();
@@ -1392,10 +1381,9 @@ pub async fn run_tests_parallel<'a>(
             None => break,
             Some((None, _)) => {
                 debug!(logger, "Job finished");
-                if let Some(pb) = progress_bar {
-                    pb.inc(1);
-                    debug_assert_eq!(pb.position(), job_id - job_executor.len() as u64);
-                } else {
+                progress_bar.inc(1);
+                debug_assert_eq!(progress_bar.position(), job_id - job_executor.len() as u64);
+                if progress_bar.is_hidden() {
                     print_progress(
                         logger,
                         start_instant,
@@ -1436,17 +1424,16 @@ pub async fn run_tests_parallel<'a>(
                                             } else {
                                                 fails += 1;
                                             }
-                                            if let Some(pb) = progress_bar {
-                                                pb.println(format!(
-                                                    "{}: {:?}",
-                                                    res.data.name, res.data.result.variant
-                                                ));
-                                                // Show fails and crashes on progress bar
-                                                pb.set_message(format!(
-                                                    "; fails: {fails}, crashes: {crashes}"
-                                                ));
-                                                pb.tick();
-                                            } else {
+                                            progress_bar.println(format!(
+                                                "{}: {:?}",
+                                                res.data.name, res.data.result.variant
+                                            ));
+                                            // Show fails and crashes on progress bar
+                                            progress_bar.set_message(format!(
+                                                "; fails: {fails}, crashes: {crashes}"
+                                            ));
+                                            progress_bar.tick();
+                                            if progress_bar.is_hidden() {
                                                 info!(logger, "Test failed";
                                                     "test" => res.data.name,
                                                     "result" => ?res.data.result.variant);
@@ -1484,9 +1471,8 @@ pub async fn run_tests_parallel<'a>(
                     }
                     JobEvent::NewJob(job) => {
                         pending_jobs.push_back(job);
-                        if let Some(pb) = progress_bar {
-                            pb.inc_length(1);
-                        } else {
+                        progress_bar.inc_length(1);
+                        if progress_bar.is_hidden() {
                             print_progress(
                                 logger,
                                 start_instant,
@@ -1500,6 +1486,7 @@ pub async fn run_tests_parallel<'a>(
 
                 if fatal_error {
                     info!(logger, "A fatal error occured, aborting all pending jobs");
+                    progress_bar.finish_and_clear();
                     pending_jobs.clear();
                     job_executor = stream::FuturesUnordered::new();
                 } else {
@@ -1509,9 +1496,8 @@ pub async fn run_tests_parallel<'a>(
         }
     }
 
-    if let Some(pb) = progress_bar {
-        pb.finish_and_clear();
-    }
+    debug_assert!(progress_bar.position() == progress_bar.length().unwrap());
+    progress_bar.finish_and_clear();
 }
 
 #[cfg(test)]
@@ -1568,6 +1554,7 @@ mod tests {
         };
 
         let mut summary = Summary::default();
+        let pb = ProgressBar::hidden();
         run_tests_parallel(
             logger,
             tests,
@@ -1575,7 +1562,7 @@ mod tests {
             &run_options,
             None,
             1, // Run only one job in parallel, to get deterministic behavior
-            None,
+            &pb,
         )
         .await;
 
