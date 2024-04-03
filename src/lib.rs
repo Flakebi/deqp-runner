@@ -1309,7 +1309,7 @@ fn print_progress(
         let eta_secs =
             now.duration_since(start).as_secs_f32() / finished as f32 * (total - finished) as f32;
         let eta = std::time::Duration::from_secs_f32(eta_secs);
-        info!(logger, "Progress update"; "finished_jobs" => finished, "total_jobs" => total,
+        info!(logger, "Progress update"; "finished_tests" => finished, "total_tests" => total,
             "eta" => ?eta);
         *last_progress_print = now;
     }
@@ -1335,7 +1335,7 @@ pub async fn run_tests_parallel<'a>(
     // The total number of jobs added to the executor
     let mut job_id: u64 = 0;
     let mut log_entry_id: u64 = 0;
-    progress_bar.set_length(pending_jobs.len() as u64);
+    progress_bar.set_length(tests.len() as u64);
     // For logging progress when there is no progress bar
     let start_instant = Instant::now();
     let mut last_progress_print = Instant::now();
@@ -1381,17 +1381,6 @@ pub async fn run_tests_parallel<'a>(
             None => break,
             Some((None, _)) => {
                 debug!(logger, "Job finished");
-                progress_bar.inc(1);
-                debug_assert_eq!(progress_bar.position(), job_id - job_executor.len() as u64);
-                if progress_bar.is_hidden() {
-                    print_progress(
-                        logger,
-                        start_instant,
-                        &mut last_progress_print,
-                        job_id - job_executor.len() as u64,
-                        job_id + pending_jobs.len() as u64,
-                    );
-                }
             }
             Some((Some(event), job_stream)) => {
                 let mut fatal_error = false;
@@ -1401,6 +1390,17 @@ pub async fn run_tests_parallel<'a>(
                             RunLogEntry::TestResult(res) => {
                                 res.id = log_entry_id;
                                 log_entry_id += 1;
+                                progress_bar.inc(1);
+                                debug_assert_eq!(progress_bar.position(), log_entry_id);
+                                if progress_bar.is_hidden() {
+                                    print_progress(
+                                        logger,
+                                        start_instant,
+                                        &mut last_progress_print,
+                                        progress_bar.position(),
+                                        progress_bar.length().unwrap(),
+                                    );
+                                }
                                 match summary.0.entry(res.data.name) {
                                     Entry::Occupied(mut entry) => {
                                         let old_id = entry.get().0.run_id;
@@ -1470,16 +1470,27 @@ pub async fn run_tests_parallel<'a>(
                         }
                     }
                     JobEvent::NewJob(job) => {
-                        pending_jobs.push_back(job);
-                        progress_bar.inc_length(1);
-                        if progress_bar.is_hidden() {
-                            print_progress(
-                                logger,
-                                start_instant,
-                                &mut last_progress_print,
-                                job_id - job_executor.len() as u64,
-                                job_id + pending_jobs.len() as u64,
-                            );
+                        let mut bisect_finished = false;
+                        if let Job::Bisect { list, .. } = &job {
+                            if list.len() <= 2 {
+                                trace!(logger, "Bisect succeeded, two tests or less left");
+                                bisect_finished = true;
+                            }
+                        }
+                        if !bisect_finished {
+                            // all new jobs return exactly one test result
+                            assert!(!matches!(job, Job::FirstRun { .. }), "Unexpected FirstRun");
+                            pending_jobs.push_back(job);
+                            progress_bar.inc_length(1);
+                            if progress_bar.is_hidden() {
+                                print_progress(
+                                    logger,
+                                    start_instant,
+                                    &mut last_progress_print,
+                                    progress_bar.position(),
+                                    progress_bar.length().unwrap(),
+                                );
+                            }
                         }
                     }
                 }
