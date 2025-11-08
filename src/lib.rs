@@ -12,14 +12,14 @@ use std::time::Instant;
 
 use futures::future::Either;
 use futures::prelude::*;
-use genawaiter::sync::gen;
+use genawaiter::sync::r#gen;
 use genawaiter::yield_;
 use indicatif::ProgressBar;
 use once_cell::sync::Lazy;
 use rand::rng;
 use rand::seq::SliceRandom;
 use serde::{Deserialize, Serialize};
-use slog::{debug, error, info, o, trace, warn, Logger};
+use slog::{Logger, debug, error, info, o, trace, warn};
 use tempfile::NamedTempFile;
 use thiserror::Error;
 use time::{Duration, OffsetDateTime};
@@ -589,75 +589,75 @@ impl<'a, 'list> RunTestListState<'a, 'list> {
     }
 
     fn create_fail_dir(&mut self, failed_test: &str) {
-        if self.fail_dir.is_none() {
-            if let Some(dir) = &self.options.fail_dir {
-                for i in 0.. {
-                    let dir_name = if i == 0 {
-                        failed_test.to_string()
-                    } else {
-                        format!("{failed_test}-{i}")
-                    };
-                    let new_dir = dir.join(&dir_name);
-                    if !new_dir.exists() {
-                        if let Err(e) = std::fs::create_dir_all(&new_dir) {
-                            error!(self.logger, "Failed to create failure directory";
+        if self.fail_dir.is_none()
+            && let Some(dir) = &self.options.fail_dir
+        {
+            for i in 0.. {
+                let dir_name = if i == 0 {
+                    failed_test.to_string()
+                } else {
+                    format!("{failed_test}-{i}")
+                };
+                let new_dir = dir.join(&dir_name);
+                if !new_dir.exists() {
+                    if let Err(e) = std::fs::create_dir_all(&new_dir) {
+                        error!(self.logger, "Failed to create failure directory";
                                 "error" => %e);
-                            return;
-                        }
-                        self.fail_dir = Some(dir_name);
-                        // Write reproduce-list.txt
-                        match std::fs::File::create(new_dir.join(TEST_LIST_FILE)) {
-                            Ok(mut f) => {
-                                if let Err(e) = (|| -> Result<(), std::io::Error> {
-                                    // Write options
-                                    write!(&mut f, "#!")?;
-                                    if self
-                                        .options
-                                        .args
-                                        .first()
-                                        .map(|a| !a.starts_with('/'))
-                                        .unwrap_or_default()
-                                    {
-                                        write!(&mut f, "/usr/bin/env -S ")?;
-                                    }
-                                    writeln!(
-                                        &mut f,
-                                        "{}",
-                                        self.options
-                                            .args
-                                            .iter()
-                                            .map(|a| a.replace('\n', "\\n"))
-                                            .collect::<Vec<_>>()
-                                            .join(" ")
-                                    )?;
-
-                                    // Write tests
-                                    for t in self.tests {
-                                        writeln!(&mut f, "{t}")?;
-                                    }
-                                    Ok(())
-                                })() {
-                                    error!(self.logger, "Failed to write reproduce list";
-                                        "error" => %e);
-                                }
-                            }
-                            Err(e) => {
-                                error!(self.logger, "Failed to create reproduce list file";
-                                    "error" => %e);
-                            }
-                        }
-                        break;
+                        return;
                     }
+                    self.fail_dir = Some(dir_name);
+                    // Write reproduce-list.txt
+                    match std::fs::File::create(new_dir.join(TEST_LIST_FILE)) {
+                        Ok(mut f) => {
+                            if let Err(e) = (|| -> Result<(), std::io::Error> {
+                                // Write options
+                                write!(&mut f, "#!")?;
+                                if self
+                                    .options
+                                    .args
+                                    .first()
+                                    .map(|a| !a.starts_with('/'))
+                                    .unwrap_or_default()
+                                {
+                                    write!(&mut f, "/usr/bin/env -S ")?;
+                                }
+                                writeln!(
+                                    &mut f,
+                                    "{}",
+                                    self.options
+                                        .args
+                                        .iter()
+                                        .map(|a| a.replace('\n', "\\n"))
+                                        .collect::<Vec<_>>()
+                                        .join(" ")
+                                )?;
+
+                                // Write tests
+                                for t in self.tests {
+                                    writeln!(&mut f, "{t}")?;
+                                }
+                                Ok(())
+                            })() {
+                                error!(self.logger, "Failed to write reproduce list";
+                                        "error" => %e);
+                            }
+                        }
+                        Err(e) => {
+                            error!(self.logger, "Failed to create reproduce list file";
+                                    "error" => %e);
+                        }
+                    }
+                    break;
                 }
             }
         }
 
-        if let Some(running) = &mut self.running {
-            if !running.stderr.is_empty() {
-                // Save current stderr
-                let stderr = mem::take(&mut running.stderr);
-                self.save_fail_dir_stderr(&stderr);
-            }
+        if let Some(running) = &mut self.running
+            && !running.stderr.is_empty()
+        {
+            // Save current stderr
+            let stderr = mem::take(&mut running.stderr);
+            self.save_fail_dir_stderr(&stderr);
         }
     }
 
@@ -802,13 +802,13 @@ impl<'a, 'list> RunTestListState<'a, 'list> {
             });
 
             let mut res = Vec::new();
-            if let Some(Err(e)) = state.finished_result {
-                if e.is_fatal() {
-                    res.push(RunTestListEvent::DeqpError(DeqpErrorWithOutput {
-                        error: e,
-                        stdout: String::new(),
-                    }));
-                }
+            if let Some(Err(e)) = state.finished_result
+                && e.is_fatal()
+            {
+                res.push(RunTestListEvent::DeqpError(DeqpErrorWithOutput {
+                    error: e,
+                    stdout: String::new(),
+                }));
             }
             res.push(result_data);
 
@@ -968,7 +968,7 @@ impl<'a> Job<'a> {
             Self::Bisect { list, state } => {
                 let split_i = (list.len() - 1) / 2;
                 let last_test = list[list.len() - 1];
-                Box::new(gen!({
+                Box::new(r#gen!({
                     if list.len() <= 2 {
                         trace!(logger, "Bisect succeeded, two tests or less left");
                         return;
@@ -1167,21 +1167,21 @@ impl Stream for RunDeqpState {
     fn poll_next(mut self: Pin<&mut Self>, ctx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         // Continue reading stdout and stderr even when the process exited
         loop {
-            if !self.stdout_finished {
-                if let Poll::Ready(r) = self.stdout_reader.as_mut().poll_next_line(ctx) {
-                    if let Some(r) = self.handle_stdout_line(r) {
-                        return Poll::Ready(Some(r));
-                    } else {
-                        continue;
-                    }
+            if !self.stdout_finished
+                && let Poll::Ready(r) = self.stdout_reader.as_mut().poll_next_line(ctx)
+            {
+                if let Some(r) = self.handle_stdout_line(r) {
+                    return Poll::Ready(Some(r));
+                } else {
+                    continue;
                 }
             }
 
-            if !self.stderr_finished {
-                if let Poll::Ready(r) = self.stderr_reader.as_mut().poll_next_line(ctx) {
-                    self.handle_stderr_line(r);
-                    continue;
-                }
+            if !self.stderr_finished
+                && let Poll::Ready(r) = self.stderr_reader.as_mut().poll_next_line(ctx)
+            {
+                self.handle_stderr_line(r);
+                continue;
             }
 
             if !self.finished {
@@ -1242,7 +1242,7 @@ pub fn run_test_list<'a, 'list>(
 ) -> impl Stream<Item = RunTestListEvent<'a, 'list>> + Send + Unpin {
     let mut state = RunTestListState::new(logger, tests, options);
 
-    gen!({
+    r#gen!({
         loop {
             if state.tests.is_empty() {
                 return;
@@ -1468,11 +1468,11 @@ pub async fn run_tests_parallel<'a>(
                     }
                     JobEvent::NewJob(job) => {
                         let mut bisect_finished = false;
-                        if let Job::Bisect { list, .. } = &job {
-                            if list.len() <= 2 {
-                                trace!(logger, "Bisect succeeded, two tests or less left");
-                                bisect_finished = true;
-                            }
+                        if let Job::Bisect { list, .. } = &job
+                            && list.len() <= 2
+                        {
+                            trace!(logger, "Bisect succeeded, two tests or less left");
+                            bisect_finished = true;
                         }
                         if !bisect_finished {
                             // all new jobs return exactly one test result

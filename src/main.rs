@@ -1,11 +1,11 @@
 use std::borrow::Cow;
 use std::collections::HashSet;
 
-use anyhow::{bail, format_err, Result};
+use anyhow::{Result, bail, format_err};
 use clap::Parser;
 use deqp_runner::*;
 use indicatif::ProgressBar;
-use slog::{info, o, Drain};
+use slog::{Drain, info, o};
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<()> {
@@ -19,7 +19,7 @@ async fn real_main() -> Result<()> {
     let mut options: Options = Options::parse();
 
     if std::env::var("RUST_LOG").is_err() {
-        std::env::set_var("RUST_LOG", "info");
+        unsafe { std::env::set_var("RUST_LOG", "info") };
     }
 
     let progress_bar = if !options.no_progress {
