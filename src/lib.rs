@@ -356,7 +356,7 @@ mod serde_io_error {
 
     pub fn deserialize<'de, D: Deserializer<'de>>(de: D) -> Result<std::io::Error, D::Error> {
         let s: String = Deserialize::deserialize(de)?;
-        Ok(std::io::Error::new(std::io::ErrorKind::Other, s))
+        Ok(std::io::Error::other(s))
     }
 }
 
@@ -416,10 +416,7 @@ impl RunDeqpState {
         mut child: Child,
     ) -> Result<Self, DeqpError> {
         let pid = child.id().ok_or_else(|| {
-            DeqpError::SpawnFailed(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                "Failed to get child pid",
-            ))
+            DeqpError::SpawnFailed(std::io::Error::other("Failed to get child pid"))
         })?;
         logger = logger.new(o!("pid" => pid));
 

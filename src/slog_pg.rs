@@ -21,10 +21,7 @@ impl Decorator for ProgressBarDecorator {
         f(&mut ProgressBarRecordDecorator(&mut rec))?;
         self.progress_bar
             .println(String::from_utf8(rec).map_err(|e| {
-                std::io::Error::new(
-                    std::io::ErrorKind::Other,
-                    format!("Cannot convert log message to string: {e}"),
-                )
+                std::io::Error::other(format!("Cannot convert log message to string: {e}"))
             })?);
         Ok(())
     }
