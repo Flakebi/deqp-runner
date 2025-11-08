@@ -1595,24 +1595,88 @@ mod tests {
     #[tokio::test]
     async fn test_a() -> Result<()> {
         let expected = vec![
-            ("dEQP-VK.tessellation.primitive_discard.triangles_equal_spacing_ccw", TestResultType::Pass),
-            ("dEQP-VK.tessellation.primitive_discard.triangles_equal_spacing_ccw_point_mode", TestResultType::Pass),
-            ("dEQP-VK.tessellation.primitive_discard.triangles_equal_spacing_cw", TestResultType::Pass),
-            ("dEQP-VK.tessellation.primitive_discard.triangles_equal_spacing_cw_point_mode", TestResultType::Pass),
-            ("dEQP-VK.tessellation.primitive_discard.triangles_fractional_odd_spacing_ccw_valid_levels", TestResultType::Pass),
-            ("dEQP-VK.tessellation.primitive_discard.triangles_fractional_odd_spacing_ccw", TestResultType::Pass),
-            ("dEQP-VK.tessellation.primitive_discard.triangles_fractional_odd_spacing_ccw_point_mode_valid_levels", TestResultType::Pass),
-            ("dEQP-VK.tessellation.primitive_discard.triangles_fractional_odd_spacing_ccw_point_mode", TestResultType::Pass),
-            ("dEQP-VK.tessellation.primitive_discard.triangles_fractional_odd_spacing_cw_valid_levels", TestResultType::Pass),
-            ("dEQP-VK.tessellation.primitive_discard.triangles_fractional_odd_spacing_cw", TestResultType::Pass),
-            ("dEQP-VK.tessellation.primitive_discard.triangles_fractional_odd_spacing_cw_point_mode_valid_levels", TestResultType::Pass),
-            ("dEQP-VK.tessellation.primitive_discard.triangles_fractional_odd_spacing_cw_point_mode", TestResultType::Pass),
-            ("dEQP-VK.tessellation.primitive_discard.triangles_fractional_even_spacing_ccw", TestResultType::Pass),
-            ("dEQP-VK.tessellation.primitive_discard.triangles_fractional_even_spacing_ccw_point_mode", TestResultType::Pass),
-            ("dEQP-VK.tessellation.primitive_discard.triangles_fractional_even_spacing_cw", TestResultType::Pass),
-            ("dEQP-VK.tessellation.primitive_discard.triangles_fractional_even_spacing_cw_point_mode", TestResultType::Pass),
-            ("dEQP-VK.fragment_shader_interlock.basic.discard.ssbo.shading_rate_unordered.4xaa.sample_shading.512x512", TestResultType::NotSupported),
-            ("dEQP-VK.fragment_shader_interlock.basic.discard.ssbo.shading_rate_unordered.4xaa.sample_shading.1024x1024", TestResultType::NotSupported),
+            (
+                "dEQP-VK.tessellation.primitive_discard.triangles_equal_spacing_ccw",
+                TestResultType::Pass,
+            ),
+            (
+                "dEQP-VK.tessellation.primitive_discard.triangles_equal_spacing_ccw_point_mode",
+                TestResultType::Pass,
+            ),
+            (
+                "dEQP-VK.tessellation.primitive_discard.triangles_equal_spacing_cw",
+                TestResultType::Pass,
+            ),
+            (
+                "dEQP-VK.tessellation.primitive_discard.triangles_equal_spacing_cw_point_mode",
+                TestResultType::Pass,
+            ),
+            (
+                "dEQP-VK.tessellation.primitive_discard.\
+                 triangles_fractional_odd_spacing_ccw_valid_levels",
+                TestResultType::Pass,
+            ),
+            (
+                "dEQP-VK.tessellation.primitive_discard.triangles_fractional_odd_spacing_ccw",
+                TestResultType::Pass,
+            ),
+            (
+                "dEQP-VK.tessellation.primitive_discard.\
+                 triangles_fractional_odd_spacing_ccw_point_mode_valid_levels",
+                TestResultType::Pass,
+            ),
+            (
+                "dEQP-VK.tessellation.primitive_discard.\
+                 triangles_fractional_odd_spacing_ccw_point_mode",
+                TestResultType::Pass,
+            ),
+            (
+                "dEQP-VK.tessellation.primitive_discard.\
+                 triangles_fractional_odd_spacing_cw_valid_levels",
+                TestResultType::Pass,
+            ),
+            (
+                "dEQP-VK.tessellation.primitive_discard.triangles_fractional_odd_spacing_cw",
+                TestResultType::Pass,
+            ),
+            (
+                "dEQP-VK.tessellation.primitive_discard.\
+                 triangles_fractional_odd_spacing_cw_point_mode_valid_levels",
+                TestResultType::Pass,
+            ),
+            (
+                "dEQP-VK.tessellation.primitive_discard.\
+                 triangles_fractional_odd_spacing_cw_point_mode",
+                TestResultType::Pass,
+            ),
+            (
+                "dEQP-VK.tessellation.primitive_discard.triangles_fractional_even_spacing_ccw",
+                TestResultType::Pass,
+            ),
+            (
+                "dEQP-VK.tessellation.primitive_discard.\
+                 triangles_fractional_even_spacing_ccw_point_mode",
+                TestResultType::Pass,
+            ),
+            (
+                "dEQP-VK.tessellation.primitive_discard.triangles_fractional_even_spacing_cw",
+                TestResultType::Pass,
+            ),
+            (
+                "dEQP-VK.tessellation.primitive_discard.\
+                 triangles_fractional_even_spacing_cw_point_mode",
+                TestResultType::Pass,
+            ),
+            (
+                "dEQP-VK.fragment_shader_interlock.basic.discard.ssbo.shading_rate_unordered.4xaa.\
+                 sample_shading.512x512",
+                TestResultType::NotSupported,
+            ),
+            (
+                "dEQP-VK.fragment_shader_interlock.basic.discard.ssbo.shading_rate_unordered.4xaa.\
+                 sample_shading.1024x1024",
+                TestResultType::NotSupported,
+            ),
         ];
 
         check_tests(
@@ -1640,24 +1704,88 @@ mod tests {
     #[tokio::test]
     async fn test_d() -> Result<()> {
         let expected = vec![
-            ("dEQP-VK.tessellation.primitive_discard.triangles_equal_spacing_ccw", TestResultType::Pass),
-            ("dEQP-VK.tessellation.primitive_discard.triangles_equal_spacing_ccw_point_mode", TestResultType::Pass),
-            ("dEQP-VK.tessellation.primitive_discard.triangles_equal_spacing_cw", TestResultType::Pass),
-            ("dEQP-VK.tessellation.primitive_discard.triangles_equal_spacing_cw_point_mode", TestResultType::Pass),
-            ("dEQP-VK.tessellation.primitive_discard.triangles_fractional_odd_spacing_ccw_valid_levels", TestResultType::Pass),
-            ("dEQP-VK.tessellation.primitive_discard.triangles_fractional_odd_spacing_ccw", TestResultType::Pass),
-            ("dEQP-VK.tessellation.primitive_discard.triangles_fractional_odd_spacing_ccw_point_mode_valid_levels", TestResultType::Pass),
-            ("dEQP-VK.tessellation.primitive_discard.triangles_fractional_odd_spacing_ccw_point_mode", TestResultType::Pass),
-            ("dEQP-VK.tessellation.primitive_discard.triangles_fractional_odd_spacing_cw_valid_levels", TestResultType::Pass),
-            ("dEQP-VK.tessellation.primitive_discard.triangles_fractional_odd_spacing_cw", TestResultType::Pass),
-            ("dEQP-VK.tessellation.primitive_discard.triangles_fractional_odd_spacing_cw_point_mode_valid_levels", TestResultType::Pass),
-            ("dEQP-VK.tessellation.primitive_discard.triangles_fractional_odd_spacing_cw_point_mode", TestResultType::Pass),
-            ("dEQP-VK.tessellation.primitive_discard.triangles_fractional_even_spacing_ccw", TestResultType::Pass),
-            ("dEQP-VK.tessellation.primitive_discard.triangles_fractional_even_spacing_ccw_point_mode", TestResultType::Pass),
-            ("dEQP-VK.tessellation.primitive_discard.triangles_fractional_even_spacing_cw", TestResultType::Pass),
-            ("dEQP-VK.tessellation.primitive_discard.triangles_fractional_even_spacing_cw_point_mode", TestResultType::Crash),
-            ("dEQP-VK.fragment_shader_interlock.basic.discard.ssbo.shading_rate_unordered.4xaa.sample_shading.512x512", TestResultType::Missing),
-            ("dEQP-VK.fragment_shader_interlock.basic.discard.ssbo.shading_rate_unordered.4xaa.sample_shading.1024x1024", TestResultType::Missing),
+            (
+                "dEQP-VK.tessellation.primitive_discard.triangles_equal_spacing_ccw",
+                TestResultType::Pass,
+            ),
+            (
+                "dEQP-VK.tessellation.primitive_discard.triangles_equal_spacing_ccw_point_mode",
+                TestResultType::Pass,
+            ),
+            (
+                "dEQP-VK.tessellation.primitive_discard.triangles_equal_spacing_cw",
+                TestResultType::Pass,
+            ),
+            (
+                "dEQP-VK.tessellation.primitive_discard.triangles_equal_spacing_cw_point_mode",
+                TestResultType::Pass,
+            ),
+            (
+                "dEQP-VK.tessellation.primitive_discard.\
+                 triangles_fractional_odd_spacing_ccw_valid_levels",
+                TestResultType::Pass,
+            ),
+            (
+                "dEQP-VK.tessellation.primitive_discard.triangles_fractional_odd_spacing_ccw",
+                TestResultType::Pass,
+            ),
+            (
+                "dEQP-VK.tessellation.primitive_discard.\
+                 triangles_fractional_odd_spacing_ccw_point_mode_valid_levels",
+                TestResultType::Pass,
+            ),
+            (
+                "dEQP-VK.tessellation.primitive_discard.\
+                 triangles_fractional_odd_spacing_ccw_point_mode",
+                TestResultType::Pass,
+            ),
+            (
+                "dEQP-VK.tessellation.primitive_discard.\
+                 triangles_fractional_odd_spacing_cw_valid_levels",
+                TestResultType::Pass,
+            ),
+            (
+                "dEQP-VK.tessellation.primitive_discard.triangles_fractional_odd_spacing_cw",
+                TestResultType::Pass,
+            ),
+            (
+                "dEQP-VK.tessellation.primitive_discard.\
+                 triangles_fractional_odd_spacing_cw_point_mode_valid_levels",
+                TestResultType::Pass,
+            ),
+            (
+                "dEQP-VK.tessellation.primitive_discard.\
+                 triangles_fractional_odd_spacing_cw_point_mode",
+                TestResultType::Pass,
+            ),
+            (
+                "dEQP-VK.tessellation.primitive_discard.triangles_fractional_even_spacing_ccw",
+                TestResultType::Pass,
+            ),
+            (
+                "dEQP-VK.tessellation.primitive_discard.\
+                 triangles_fractional_even_spacing_ccw_point_mode",
+                TestResultType::Pass,
+            ),
+            (
+                "dEQP-VK.tessellation.primitive_discard.triangles_fractional_even_spacing_cw",
+                TestResultType::Pass,
+            ),
+            (
+                "dEQP-VK.tessellation.primitive_discard.\
+                 triangles_fractional_even_spacing_cw_point_mode",
+                TestResultType::Crash,
+            ),
+            (
+                "dEQP-VK.fragment_shader_interlock.basic.discard.ssbo.shading_rate_unordered.4xaa.\
+                 sample_shading.512x512",
+                TestResultType::Missing,
+            ),
+            (
+                "dEQP-VK.fragment_shader_interlock.basic.discard.ssbo.shading_rate_unordered.4xaa.\
+                 sample_shading.1024x1024",
+                TestResultType::Missing,
+            ),
         ];
 
         check_tests(
@@ -1672,22 +1800,78 @@ mod tests {
     #[tokio::test]
     async fn test_d_fatal() -> Result<()> {
         let expected = vec![
-            ("dEQP-VK.tessellation.primitive_discard.triangles_equal_spacing_ccw", TestResultType::Pass),
-            ("dEQP-VK.tessellation.primitive_discard.triangles_equal_spacing_ccw_point_mode", TestResultType::Pass),
-            ("dEQP-VK.tessellation.primitive_discard.triangles_equal_spacing_cw", TestResultType::Pass),
-            ("dEQP-VK.tessellation.primitive_discard.triangles_equal_spacing_cw_point_mode", TestResultType::Pass),
-            ("dEQP-VK.tessellation.primitive_discard.triangles_fractional_odd_spacing_ccw_valid_levels", TestResultType::Pass),
-            ("dEQP-VK.tessellation.primitive_discard.triangles_fractional_odd_spacing_ccw", TestResultType::Pass),
-            ("dEQP-VK.tessellation.primitive_discard.triangles_fractional_odd_spacing_ccw_point_mode_valid_levels", TestResultType::Pass),
-            ("dEQP-VK.tessellation.primitive_discard.triangles_fractional_odd_spacing_ccw_point_mode", TestResultType::Pass),
-            ("dEQP-VK.tessellation.primitive_discard.triangles_fractional_odd_spacing_cw_valid_levels", TestResultType::Pass),
-            ("dEQP-VK.tessellation.primitive_discard.triangles_fractional_odd_spacing_cw", TestResultType::Pass),
-            ("dEQP-VK.tessellation.primitive_discard.triangles_fractional_odd_spacing_cw_point_mode_valid_levels", TestResultType::Pass),
-            ("dEQP-VK.tessellation.primitive_discard.triangles_fractional_odd_spacing_cw_point_mode", TestResultType::Pass),
-            ("dEQP-VK.tessellation.primitive_discard.triangles_fractional_even_spacing_ccw", TestResultType::Pass),
-            ("dEQP-VK.tessellation.primitive_discard.triangles_fractional_even_spacing_ccw_point_mode", TestResultType::Pass),
-            ("dEQP-VK.tessellation.primitive_discard.triangles_fractional_even_spacing_cw", TestResultType::Pass),
-            ("dEQP-VK.tessellation.primitive_discard.triangles_fractional_even_spacing_cw_point_mode", TestResultType::Crash),
+            (
+                "dEQP-VK.tessellation.primitive_discard.triangles_equal_spacing_ccw",
+                TestResultType::Pass,
+            ),
+            (
+                "dEQP-VK.tessellation.primitive_discard.triangles_equal_spacing_ccw_point_mode",
+                TestResultType::Pass,
+            ),
+            (
+                "dEQP-VK.tessellation.primitive_discard.triangles_equal_spacing_cw",
+                TestResultType::Pass,
+            ),
+            (
+                "dEQP-VK.tessellation.primitive_discard.triangles_equal_spacing_cw_point_mode",
+                TestResultType::Pass,
+            ),
+            (
+                "dEQP-VK.tessellation.primitive_discard.\
+                 triangles_fractional_odd_spacing_ccw_valid_levels",
+                TestResultType::Pass,
+            ),
+            (
+                "dEQP-VK.tessellation.primitive_discard.triangles_fractional_odd_spacing_ccw",
+                TestResultType::Pass,
+            ),
+            (
+                "dEQP-VK.tessellation.primitive_discard.\
+                 triangles_fractional_odd_spacing_ccw_point_mode_valid_levels",
+                TestResultType::Pass,
+            ),
+            (
+                "dEQP-VK.tessellation.primitive_discard.\
+                 triangles_fractional_odd_spacing_ccw_point_mode",
+                TestResultType::Pass,
+            ),
+            (
+                "dEQP-VK.tessellation.primitive_discard.\
+                 triangles_fractional_odd_spacing_cw_valid_levels",
+                TestResultType::Pass,
+            ),
+            (
+                "dEQP-VK.tessellation.primitive_discard.triangles_fractional_odd_spacing_cw",
+                TestResultType::Pass,
+            ),
+            (
+                "dEQP-VK.tessellation.primitive_discard.\
+                 triangles_fractional_odd_spacing_cw_point_mode_valid_levels",
+                TestResultType::Pass,
+            ),
+            (
+                "dEQP-VK.tessellation.primitive_discard.\
+                 triangles_fractional_odd_spacing_cw_point_mode",
+                TestResultType::Pass,
+            ),
+            (
+                "dEQP-VK.tessellation.primitive_discard.triangles_fractional_even_spacing_ccw",
+                TestResultType::Pass,
+            ),
+            (
+                "dEQP-VK.tessellation.primitive_discard.\
+                 triangles_fractional_even_spacing_ccw_point_mode",
+                TestResultType::Pass,
+            ),
+            (
+                "dEQP-VK.tessellation.primitive_discard.triangles_fractional_even_spacing_cw",
+                TestResultType::Pass,
+            ),
+            (
+                "dEQP-VK.tessellation.primitive_discard.\
+                 triangles_fractional_even_spacing_cw_point_mode",
+                TestResultType::Crash,
+            ),
         ];
 
         // TODO Check that we retest after a fatal error
@@ -1703,22 +1887,78 @@ mod tests {
     #[tokio::test]
     async fn test_timeout() -> Result<()> {
         let expected = vec![
-            ("dEQP-VK.tessellation.primitive_discard.triangles_equal_spacing_ccw", TestResultType::Pass),
-            ("dEQP-VK.tessellation.primitive_discard.triangles_equal_spacing_ccw_point_mode", TestResultType::Pass),
-            ("dEQP-VK.tessellation.primitive_discard.triangles_equal_spacing_cw", TestResultType::Pass),
-            ("dEQP-VK.tessellation.primitive_discard.triangles_equal_spacing_cw_point_mode", TestResultType::Pass),
-            ("dEQP-VK.tessellation.primitive_discard.triangles_fractional_odd_spacing_ccw_valid_levels", TestResultType::Pass),
-            ("dEQP-VK.tessellation.primitive_discard.triangles_fractional_odd_spacing_ccw", TestResultType::Pass),
-            ("dEQP-VK.tessellation.primitive_discard.triangles_fractional_odd_spacing_ccw_point_mode_valid_levels", TestResultType::Pass),
-            ("dEQP-VK.tessellation.primitive_discard.triangles_fractional_odd_spacing_ccw_point_mode", TestResultType::Pass),
-            ("dEQP-VK.tessellation.primitive_discard.triangles_fractional_odd_spacing_cw_valid_levels", TestResultType::Pass),
-            ("dEQP-VK.tessellation.primitive_discard.triangles_fractional_odd_spacing_cw", TestResultType::Pass),
-            ("dEQP-VK.tessellation.primitive_discard.triangles_fractional_odd_spacing_cw_point_mode_valid_levels", TestResultType::Pass),
-            ("dEQP-VK.tessellation.primitive_discard.triangles_fractional_odd_spacing_cw_point_mode", TestResultType::Pass),
-            ("dEQP-VK.tessellation.primitive_discard.triangles_fractional_even_spacing_ccw", TestResultType::Pass),
-            ("dEQP-VK.tessellation.primitive_discard.triangles_fractional_even_spacing_ccw_point_mode", TestResultType::Pass),
-            ("dEQP-VK.tessellation.primitive_discard.triangles_fractional_even_spacing_cw", TestResultType::Pass),
-            ("dEQP-VK.tessellation.primitive_discard.triangles_fractional_even_spacing_cw_point_mode", TestResultType::Timeout),
+            (
+                "dEQP-VK.tessellation.primitive_discard.triangles_equal_spacing_ccw",
+                TestResultType::Pass,
+            ),
+            (
+                "dEQP-VK.tessellation.primitive_discard.triangles_equal_spacing_ccw_point_mode",
+                TestResultType::Pass,
+            ),
+            (
+                "dEQP-VK.tessellation.primitive_discard.triangles_equal_spacing_cw",
+                TestResultType::Pass,
+            ),
+            (
+                "dEQP-VK.tessellation.primitive_discard.triangles_equal_spacing_cw_point_mode",
+                TestResultType::Pass,
+            ),
+            (
+                "dEQP-VK.tessellation.primitive_discard.\
+                 triangles_fractional_odd_spacing_ccw_valid_levels",
+                TestResultType::Pass,
+            ),
+            (
+                "dEQP-VK.tessellation.primitive_discard.triangles_fractional_odd_spacing_ccw",
+                TestResultType::Pass,
+            ),
+            (
+                "dEQP-VK.tessellation.primitive_discard.\
+                 triangles_fractional_odd_spacing_ccw_point_mode_valid_levels",
+                TestResultType::Pass,
+            ),
+            (
+                "dEQP-VK.tessellation.primitive_discard.\
+                 triangles_fractional_odd_spacing_ccw_point_mode",
+                TestResultType::Pass,
+            ),
+            (
+                "dEQP-VK.tessellation.primitive_discard.\
+                 triangles_fractional_odd_spacing_cw_valid_levels",
+                TestResultType::Pass,
+            ),
+            (
+                "dEQP-VK.tessellation.primitive_discard.triangles_fractional_odd_spacing_cw",
+                TestResultType::Pass,
+            ),
+            (
+                "dEQP-VK.tessellation.primitive_discard.\
+                 triangles_fractional_odd_spacing_cw_point_mode_valid_levels",
+                TestResultType::Pass,
+            ),
+            (
+                "dEQP-VK.tessellation.primitive_discard.\
+                 triangles_fractional_odd_spacing_cw_point_mode",
+                TestResultType::Pass,
+            ),
+            (
+                "dEQP-VK.tessellation.primitive_discard.triangles_fractional_even_spacing_ccw",
+                TestResultType::Pass,
+            ),
+            (
+                "dEQP-VK.tessellation.primitive_discard.\
+                 triangles_fractional_even_spacing_ccw_point_mode",
+                TestResultType::Pass,
+            ),
+            (
+                "dEQP-VK.tessellation.primitive_discard.triangles_fractional_even_spacing_cw",
+                TestResultType::Pass,
+            ),
+            (
+                "dEQP-VK.tessellation.primitive_discard.\
+                 triangles_fractional_even_spacing_cw_point_mode",
+                TestResultType::Timeout,
+            ),
         ];
 
         check_tests(
@@ -1733,32 +1973,94 @@ mod tests {
     #[tokio::test]
     async fn test_timeout_fatal_error() -> Result<()> {
         let expected = vec![
-            ("dEQP-VK.tessellation.primitive_discard.triangles_equal_spacing_ccw", TestResultType::Pass),
-            ("dEQP-VK.tessellation.primitive_discard.triangles_equal_spacing_ccw_point_mode", TestResultType::Pass),
-            ("dEQP-VK.tessellation.primitive_discard.triangles_equal_spacing_cw", TestResultType::Pass),
-            ("dEQP-VK.tessellation.primitive_discard.triangles_equal_spacing_cw_point_mode", TestResultType::Pass),
-            ("dEQP-VK.tessellation.primitive_discard.triangles_fractional_odd_spacing_ccw_valid_levels", TestResultType::Pass),
-            ("dEQP-VK.tessellation.primitive_discard.triangles_fractional_odd_spacing_ccw", TestResultType::Pass),
-            ("dEQP-VK.tessellation.primitive_discard.triangles_fractional_odd_spacing_ccw_point_mode_valid_levels", TestResultType::Pass),
-            ("dEQP-VK.tessellation.primitive_discard.triangles_fractional_odd_spacing_ccw_point_mode", TestResultType::Pass),
-            ("dEQP-VK.tessellation.primitive_discard.triangles_fractional_odd_spacing_cw_valid_levels", TestResultType::Pass),
-            ("dEQP-VK.tessellation.primitive_discard.triangles_fractional_odd_spacing_cw", TestResultType::Pass),
-            ("dEQP-VK.tessellation.primitive_discard.triangles_fractional_odd_spacing_cw_point_mode_valid_levels", TestResultType::Pass),
-            ("dEQP-VK.tessellation.primitive_discard.triangles_fractional_odd_spacing_cw_point_mode", TestResultType::Pass),
-            ("dEQP-VK.tessellation.primitive_discard.triangles_fractional_even_spacing_ccw", TestResultType::Pass),
-            ("dEQP-VK.tessellation.primitive_discard.triangles_fractional_even_spacing_ccw_point_mode", TestResultType::Pass),
-            ("dEQP-VK.tessellation.primitive_discard.triangles_fractional_even_spacing_cw", TestResultType::Pass),
-            ("dEQP-VK.tessellation.primitive_discard.triangles_fractional_even_spacing_cw_point_mode", TestResultType::Timeout),
+            (
+                "dEQP-VK.tessellation.primitive_discard.triangles_equal_spacing_ccw",
+                TestResultType::Pass,
+            ),
+            (
+                "dEQP-VK.tessellation.primitive_discard.triangles_equal_spacing_ccw_point_mode",
+                TestResultType::Pass,
+            ),
+            (
+                "dEQP-VK.tessellation.primitive_discard.triangles_equal_spacing_cw",
+                TestResultType::Pass,
+            ),
+            (
+                "dEQP-VK.tessellation.primitive_discard.triangles_equal_spacing_cw_point_mode",
+                TestResultType::Pass,
+            ),
+            (
+                "dEQP-VK.tessellation.primitive_discard.\
+                 triangles_fractional_odd_spacing_ccw_valid_levels",
+                TestResultType::Pass,
+            ),
+            (
+                "dEQP-VK.tessellation.primitive_discard.triangles_fractional_odd_spacing_ccw",
+                TestResultType::Pass,
+            ),
+            (
+                "dEQP-VK.tessellation.primitive_discard.\
+                 triangles_fractional_odd_spacing_ccw_point_mode_valid_levels",
+                TestResultType::Pass,
+            ),
+            (
+                "dEQP-VK.tessellation.primitive_discard.\
+                 triangles_fractional_odd_spacing_ccw_point_mode",
+                TestResultType::Pass,
+            ),
+            (
+                "dEQP-VK.tessellation.primitive_discard.\
+                 triangles_fractional_odd_spacing_cw_valid_levels",
+                TestResultType::Pass,
+            ),
+            (
+                "dEQP-VK.tessellation.primitive_discard.triangles_fractional_odd_spacing_cw",
+                TestResultType::Pass,
+            ),
+            (
+                "dEQP-VK.tessellation.primitive_discard.\
+                 triangles_fractional_odd_spacing_cw_point_mode_valid_levels",
+                TestResultType::Pass,
+            ),
+            (
+                "dEQP-VK.tessellation.primitive_discard.\
+                 triangles_fractional_odd_spacing_cw_point_mode",
+                TestResultType::Pass,
+            ),
+            (
+                "dEQP-VK.tessellation.primitive_discard.triangles_fractional_even_spacing_ccw",
+                TestResultType::Pass,
+            ),
+            (
+                "dEQP-VK.tessellation.primitive_discard.\
+                 triangles_fractional_even_spacing_ccw_point_mode",
+                TestResultType::Pass,
+            ),
+            (
+                "dEQP-VK.tessellation.primitive_discard.triangles_fractional_even_spacing_cw",
+                TestResultType::Pass,
+            ),
+            (
+                "dEQP-VK.tessellation.primitive_discard.\
+                 triangles_fractional_even_spacing_cw_point_mode",
+                TestResultType::Timeout,
+            ),
         ];
 
         check_tests_with_summary(
             &["test/test-timeout.sh", "logs/d", "logs/d-err", "1"],
             &expected,
             |summary| {
-                let res = summary.0.get("dEQP-VK.tessellation.primitive_discard.triangles_fractional_even_spacing_cw_point_mode").unwrap();
+                let res = summary
+                    .0
+                    .get(
+                        "dEQP-VK.tessellation.primitive_discard.\
+                         triangles_fractional_even_spacing_cw_point_mode",
+                    )
+                    .unwrap();
                 assert_eq!(res.0.run_id, Some(15));
                 assert!(res.1.as_ref().unwrap().pid.is_some());
-            }
+            },
         )
         .await?;
 
@@ -1768,35 +2070,115 @@ mod tests {
     #[tokio::test]
     async fn test_bisect() -> Result<()> {
         let expected = vec![
-            ("dEQP-VK.tessellation.primitive_discard.triangles_equal_spacing_ccw", TestResultType::Pass),
-            ("dEQP-VK.tessellation.primitive_discard.triangles_equal_spacing_ccw_point_mode", TestResultType::Pass),
-            ("dEQP-VK.tessellation.primitive_discard.triangles_equal_spacing_cw", TestResultType::Pass),
-            ("dEQP-VK.tessellation.primitive_discard.triangles_equal_spacing_cw_point_mode", TestResultType::Pass),
-            ("dEQP-VK.tessellation.primitive_discard.triangles_fractional_odd_spacing_ccw_valid_levels", TestResultType::Pass),
-            ("dEQP-VK.tessellation.primitive_discard.triangles_fractional_odd_spacing_ccw", TestResultType::Pass),
-            ("dEQP-VK.tessellation.primitive_discard.triangles_fractional_odd_spacing_ccw_point_mode_valid_levels", TestResultType::Pass),
-            ("dEQP-VK.tessellation.primitive_discard.triangles_fractional_odd_spacing_ccw_point_mode", TestResultType::Pass),
-            ("dEQP-VK.tessellation.primitive_discard.triangles_fractional_odd_spacing_cw_valid_levels", TestResultType::Pass),
-            ("dEQP-VK.tessellation.primitive_discard.triangles_fractional_odd_spacing_cw", TestResultType::Pass),
-            ("dEQP-VK.tessellation.primitive_discard.triangles_fractional_odd_spacing_cw_point_mode_valid_levels", TestResultType::Pass),
-            ("dEQP-VK.tessellation.primitive_discard.triangles_fractional_odd_spacing_cw_point_mode", TestResultType::Pass),
-            ("dEQP-VK.tessellation.primitive_discard.triangles_fractional_even_spacing_ccw", TestResultType::Pass),
-            ("dEQP-VK.tessellation.primitive_discard.triangles_fractional_even_spacing_ccw_point_mode", TestResultType::Pass),
-            ("dEQP-VK.tessellation.primitive_discard.triangles_fractional_even_spacing_cw", TestResultType::Pass),
-            ("dEQP-VK.tessellation.primitive_discard.triangles_fractional_even_spacing_cw_point_mode", TestResultType::Crash),
-            ("dEQP-VK.fragment_shader_interlock.basic.discard.ssbo.shading_rate_unordered.4xaa.sample_shading.512x512", TestResultType::NotSupported),
-            ("dEQP-VK.fragment_shader_interlock.basic.discard.ssbo.shading_rate_unordered.4xaa.sample_shading.1024x1024", TestResultType::NotSupported),
+            (
+                "dEQP-VK.tessellation.primitive_discard.triangles_equal_spacing_ccw",
+                TestResultType::Pass,
+            ),
+            (
+                "dEQP-VK.tessellation.primitive_discard.triangles_equal_spacing_ccw_point_mode",
+                TestResultType::Pass,
+            ),
+            (
+                "dEQP-VK.tessellation.primitive_discard.triangles_equal_spacing_cw",
+                TestResultType::Pass,
+            ),
+            (
+                "dEQP-VK.tessellation.primitive_discard.triangles_equal_spacing_cw_point_mode",
+                TestResultType::Pass,
+            ),
+            (
+                "dEQP-VK.tessellation.primitive_discard.\
+                 triangles_fractional_odd_spacing_ccw_valid_levels",
+                TestResultType::Pass,
+            ),
+            (
+                "dEQP-VK.tessellation.primitive_discard.triangles_fractional_odd_spacing_ccw",
+                TestResultType::Pass,
+            ),
+            (
+                "dEQP-VK.tessellation.primitive_discard.\
+                 triangles_fractional_odd_spacing_ccw_point_mode_valid_levels",
+                TestResultType::Pass,
+            ),
+            (
+                "dEQP-VK.tessellation.primitive_discard.\
+                 triangles_fractional_odd_spacing_ccw_point_mode",
+                TestResultType::Pass,
+            ),
+            (
+                "dEQP-VK.tessellation.primitive_discard.\
+                 triangles_fractional_odd_spacing_cw_valid_levels",
+                TestResultType::Pass,
+            ),
+            (
+                "dEQP-VK.tessellation.primitive_discard.triangles_fractional_odd_spacing_cw",
+                TestResultType::Pass,
+            ),
+            (
+                "dEQP-VK.tessellation.primitive_discard.\
+                 triangles_fractional_odd_spacing_cw_point_mode_valid_levels",
+                TestResultType::Pass,
+            ),
+            (
+                "dEQP-VK.tessellation.primitive_discard.\
+                 triangles_fractional_odd_spacing_cw_point_mode",
+                TestResultType::Pass,
+            ),
+            (
+                "dEQP-VK.tessellation.primitive_discard.triangles_fractional_even_spacing_ccw",
+                TestResultType::Pass,
+            ),
+            (
+                "dEQP-VK.tessellation.primitive_discard.\
+                 triangles_fractional_even_spacing_ccw_point_mode",
+                TestResultType::Pass,
+            ),
+            (
+                "dEQP-VK.tessellation.primitive_discard.triangles_fractional_even_spacing_cw",
+                TestResultType::Pass,
+            ),
+            (
+                "dEQP-VK.tessellation.primitive_discard.\
+                 triangles_fractional_even_spacing_cw_point_mode",
+                TestResultType::Crash,
+            ),
+            (
+                "dEQP-VK.fragment_shader_interlock.basic.discard.ssbo.shading_rate_unordered.4xaa.\
+                 sample_shading.512x512",
+                TestResultType::NotSupported,
+            ),
+            (
+                "dEQP-VK.fragment_shader_interlock.basic.discard.ssbo.shading_rate_unordered.4xaa.\
+                 sample_shading.1024x1024",
+                TestResultType::NotSupported,
+            ),
         ];
 
         check_tests_with_summary(
-            &["test/bisect-test-runner.sh", "dEQP-VK.tessellation.primitive_discard.triangles_fractional_odd_spacing_ccw_valid_levels", "logs/d", "/dev/null", "1", "logs/a", "dev/null", "0"],
+            &[
+                "test/bisect-test-runner.sh",
+                "dEQP-VK.tessellation.primitive_discard.\
+                 triangles_fractional_odd_spacing_ccw_valid_levels",
+                "logs/d",
+                "/dev/null",
+                "1",
+                "logs/a",
+                "dev/null",
+                "0",
+            ],
             &expected,
             |summary| {
                 // TODO Check bisection result with get_test_results returned by check_tests
-                let res = summary.0.get("dEQP-VK.tessellation.primitive_discard.triangles_fractional_even_spacing_cw_point_mode").unwrap();
+                let res = summary
+                    .0
+                    .get(
+                        "dEQP-VK.tessellation.primitive_discard.\
+                         triangles_fractional_even_spacing_cw_point_mode",
+                    )
+                    .unwrap();
                 assert_eq!(res.1.as_ref().unwrap().fail_dir, None);
                 assert_eq!(res.0.run_id, Some(25));
-            }
+            },
         )
         .await?;
 
@@ -1925,24 +2307,88 @@ mod tests {
         assert_eq!(tests.len(), 18, "Test size does not match");
 
         let expected = vec![
-            ("dEQP-VK.tessellation.primitive_discard.triangles_equal_spacing_ccw", TestResultType::Pass),
-            ("dEQP-VK.tessellation.primitive_discard.triangles_equal_spacing_ccw_point_mode", TestResultType::Pass),
-            ("dEQP-VK.tessellation.primitive_discard.triangles_equal_spacing_cw", TestResultType::Pass),
-            ("dEQP-VK.tessellation.primitive_discard.triangles_equal_spacing_cw_point_mode", TestResultType::Pass),
-            ("dEQP-VK.tessellation.primitive_discard.triangles_fractional_odd_spacing_ccw_valid_levels", TestResultType::Pass),
-            ("dEQP-VK.tessellation.primitive_discard.triangles_fractional_odd_spacing_ccw", TestResultType::Pass),
-            ("dEQP-VK.tessellation.primitive_discard.triangles_fractional_odd_spacing_ccw_point_mode_valid_levels", TestResultType::Pass),
-            ("dEQP-VK.tessellation.primitive_discard.triangles_fractional_odd_spacing_ccw_point_mode", TestResultType::Pass),
-            ("dEQP-VK.tessellation.primitive_discard.triangles_fractional_odd_spacing_cw_valid_levels", TestResultType::Pass),
-            ("dEQP-VK.tessellation.primitive_discard.triangles_fractional_odd_spacing_cw", TestResultType::Pass),
-            ("dEQP-VK.tessellation.primitive_discard.triangles_fractional_odd_spacing_cw_point_mode_valid_levels", TestResultType::Pass),
-            ("dEQP-VK.tessellation.primitive_discard.triangles_fractional_odd_spacing_cw_point_mode", TestResultType::Pass),
-            ("dEQP-VK.tessellation.primitive_discard.triangles_fractional_even_spacing_ccw", TestResultType::Pass),
-            ("dEQP-VK.tessellation.primitive_discard.triangles_fractional_even_spacing_ccw_point_mode", TestResultType::Pass),
-            ("dEQP-VK.tessellation.primitive_discard.triangles_fractional_even_spacing_cw", TestResultType::Pass),
-            ("dEQP-VK.tessellation.primitive_discard.triangles_fractional_even_spacing_cw_point_mode", TestResultType::Crash),
-            ("dEQP-VK.fragment_shader_interlock.basic.discard.ssbo.shading_rate_unordered.4xaa.sample_shading.512x512", TestResultType::Missing),
-            ("dEQP-VK.fragment_shader_interlock.basic.discard.ssbo.shading_rate_unordered.4xaa.sample_shading.1024x1024", TestResultType::Missing),
+            (
+                "dEQP-VK.tessellation.primitive_discard.triangles_equal_spacing_ccw",
+                TestResultType::Pass,
+            ),
+            (
+                "dEQP-VK.tessellation.primitive_discard.triangles_equal_spacing_ccw_point_mode",
+                TestResultType::Pass,
+            ),
+            (
+                "dEQP-VK.tessellation.primitive_discard.triangles_equal_spacing_cw",
+                TestResultType::Pass,
+            ),
+            (
+                "dEQP-VK.tessellation.primitive_discard.triangles_equal_spacing_cw_point_mode",
+                TestResultType::Pass,
+            ),
+            (
+                "dEQP-VK.tessellation.primitive_discard.\
+                 triangles_fractional_odd_spacing_ccw_valid_levels",
+                TestResultType::Pass,
+            ),
+            (
+                "dEQP-VK.tessellation.primitive_discard.triangles_fractional_odd_spacing_ccw",
+                TestResultType::Pass,
+            ),
+            (
+                "dEQP-VK.tessellation.primitive_discard.\
+                 triangles_fractional_odd_spacing_ccw_point_mode_valid_levels",
+                TestResultType::Pass,
+            ),
+            (
+                "dEQP-VK.tessellation.primitive_discard.\
+                 triangles_fractional_odd_spacing_ccw_point_mode",
+                TestResultType::Pass,
+            ),
+            (
+                "dEQP-VK.tessellation.primitive_discard.\
+                 triangles_fractional_odd_spacing_cw_valid_levels",
+                TestResultType::Pass,
+            ),
+            (
+                "dEQP-VK.tessellation.primitive_discard.triangles_fractional_odd_spacing_cw",
+                TestResultType::Pass,
+            ),
+            (
+                "dEQP-VK.tessellation.primitive_discard.\
+                 triangles_fractional_odd_spacing_cw_point_mode_valid_levels",
+                TestResultType::Pass,
+            ),
+            (
+                "dEQP-VK.tessellation.primitive_discard.\
+                 triangles_fractional_odd_spacing_cw_point_mode",
+                TestResultType::Pass,
+            ),
+            (
+                "dEQP-VK.tessellation.primitive_discard.triangles_fractional_even_spacing_ccw",
+                TestResultType::Pass,
+            ),
+            (
+                "dEQP-VK.tessellation.primitive_discard.\
+                 triangles_fractional_even_spacing_ccw_point_mode",
+                TestResultType::Pass,
+            ),
+            (
+                "dEQP-VK.tessellation.primitive_discard.triangles_fractional_even_spacing_cw",
+                TestResultType::Pass,
+            ),
+            (
+                "dEQP-VK.tessellation.primitive_discard.\
+                 triangles_fractional_even_spacing_cw_point_mode",
+                TestResultType::Crash,
+            ),
+            (
+                "dEQP-VK.fragment_shader_interlock.basic.discard.ssbo.shading_rate_unordered.4xaa.\
+                 sample_shading.512x512",
+                TestResultType::Missing,
+            ),
+            (
+                "dEQP-VK.fragment_shader_interlock.basic.discard.ssbo.shading_rate_unordered.4xaa.\
+                 sample_shading.1024x1024",
+                TestResultType::Missing,
+            ),
         ];
 
         check_tests_intern(
@@ -1950,7 +2396,13 @@ mod tests {
             &["test/test-runner.sh", "logs/d", "/dev/null", "0"],
             &expected,
             |summary| {
-                let res = summary.0.get("dEQP-VK.tessellation.primitive_discard.triangles_fractional_even_spacing_cw_point_mode").unwrap();
+                let res = summary
+                    .0
+                    .get(
+                        "dEQP-VK.tessellation.primitive_discard.\
+                         triangles_fractional_even_spacing_cw_point_mode",
+                    )
+                    .unwrap();
                 assert_eq!(res.1.as_ref().unwrap().fail_dir, None);
                 assert_eq!(res.0.run_id, Some(15));
             },

@@ -1,0 +1,11 @@
+newline_style = "Unix"
+
+use_try_shorthand = true
+
+# Unstable
+
+where_single_line = true
+comment_width = 100
+wrap_comments = true
+format_strings = true
+overflow_delimited_expr = true

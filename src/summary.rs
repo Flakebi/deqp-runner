@@ -5,7 +5,7 @@ use std::io::{BufRead, BufReader};
 use std::path::Path;
 
 use serde::{Deserialize, Serialize};
-use slog::{warn, Logger};
+use slog::{Logger, warn};
 use thiserror::Error;
 
 use crate::{TestResultData, TestResultType};
@@ -259,7 +259,11 @@ mod tests {
         println!("{report:?}");
         assert_eq!(count, 2, "Test case count does not match");
         let test = &report.testsuites()[0].testcases[0];
-        assert_eq!(test.name, "dEQP-VK.tessellation.primitive_discard.triangles_fractional_even_spacing_cw_point_mode");
+        assert_eq!(
+            test.name,
+            "dEQP-VK.tessellation.primitive_discard.\
+             triangles_fractional_even_spacing_cw_point_mode"
+        );
         assert!(test.is_failure());
 
         Ok(())
@@ -272,7 +276,11 @@ mod tests {
         println!("{report:?}");
         assert_eq!(count, 2, "Test case count does not match");
         let test = &report.testsuites()[0].testcases[0];
-        assert_eq!(test.name, "dEQP-VK.tessellation.primitive_discard.triangles_fractional_even_spacing_cw_point_mode");
+        assert_eq!(
+            test.name,
+            "dEQP-VK.tessellation.primitive_discard.\
+             triangles_fractional_even_spacing_cw_point_mode"
+        );
         assert!(test.is_failure());
 
         Ok(())
@@ -285,7 +293,11 @@ mod tests {
         println!("{report:?}");
         assert_eq!(count, 2, "Test case count does not match");
         let test = &report.testsuites()[0].testcases[0];
-        assert_eq!(test.name, "dEQP-VK.tessellation.primitive_discard.triangles_fractional_even_spacing_cw_point_mode");
+        assert_eq!(
+            test.name,
+            "dEQP-VK.tessellation.primitive_discard.\
+             triangles_fractional_even_spacing_cw_point_mode"
+        );
         assert!(test.is_failure());
 
         Ok(())
@@ -293,14 +305,27 @@ mod tests {
 
     #[tokio::test]
     async fn test_bisect() -> Result<()> {
-        let report = check_tests(
-            &["test/bisect-test-runner.sh", "dEQP-VK.tessellation.primitive_discard.triangles_fractional_odd_spacing_ccw_valid_levels", "logs/d", "/dev/null", "1", "logs/a", "dev/null", "0"],
-        ).await?;
+        let report = check_tests(&[
+            "test/bisect-test-runner.sh",
+            "dEQP-VK.tessellation.primitive_discard.\
+             triangles_fractional_odd_spacing_ccw_valid_levels",
+            "logs/d",
+            "/dev/null",
+            "1",
+            "logs/a",
+            "dev/null",
+            "0",
+        ])
+        .await?;
         let count: usize = report.testsuites().iter().map(|s| s.testcases.len()).sum();
         println!("{report:?}");
         assert_eq!(count, 1, "Test case count does not match");
         let test = &report.testsuites()[0].testcases[0];
-        assert_eq!(test.name, "dEQP-VK.tessellation.primitive_discard.triangles_fractional_even_spacing_cw_point_mode");
+        assert_eq!(
+            test.name,
+            "dEQP-VK.tessellation.primitive_discard.\
+             triangles_fractional_even_spacing_cw_point_mode"
+        );
         assert!(test.is_failure());
 
         Ok(())
