@@ -16,8 +16,8 @@ use genawaiter::sync::gen;
 use genawaiter::yield_;
 use indicatif::ProgressBar;
 use once_cell::sync::Lazy;
+use rand::rng;
 use rand::seq::SliceRandom;
-use rand::thread_rng;
 use serde::{Deserialize, Serialize};
 use slog::{debug, error, info, o, trace, warn, Logger};
 use tempfile::NamedTempFile;
@@ -1066,7 +1066,7 @@ pub fn shuffle_in_batches(tests: &mut [&str], batch_size: usize) {
         .enumerate()
         .map(|(i, n)| (*n, i))
         .collect::<HashMap<_, _>>();
-    let mut rng = thread_rng();
+    let mut rng = rng();
     tests.shuffle(&mut rng);
     for c in tests.chunks_mut(batch_size) {
         c.sort_by_key(|n| name_to_index.get(n).unwrap());
@@ -1811,7 +1811,7 @@ mod tests {
         for i in 0..(batch_size * 5 - batch_size / 3) {
             expected.push((i.to_string(), TestResultType::Pass));
         }
-        let mut rng = thread_rng();
+        let mut rng = rng();
         expected.shuffle(&mut rng);
         expected
     }
