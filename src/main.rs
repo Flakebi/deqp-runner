@@ -5,7 +5,8 @@ use anyhow::{Result, bail, format_err};
 use clap::Parser;
 use deqp_runner::*;
 use indicatif::ProgressBar;
-use slog::{Drain, info, o};
+use tracing::info;
+use tracing_subscriber::EnvFilter;
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<()> {
@@ -17,10 +18,6 @@ async fn main() -> Result<()> {
 
 async fn real_main() -> Result<()> {
     let mut options: Options = Options::parse();
-
-    if std::env::var("RUST_LOG").is_err() {
-        unsafe { std::env::set_var("RUST_LOG", "info") };
-    }
 
     let progress_bar = if !options.no_progress {
         let bar = ProgressBar::new(1);
@@ -34,29 +31,21 @@ async fn real_main() -> Result<()> {
         ProgressBar::hidden()
     };
 
-    let logger = if !progress_bar.is_hidden() {
-        let drain = slog_term::FullFormat::new(deqp_runner::slog_pg::ProgressBarDecorator {
-            progress_bar: progress_bar.clone(),
-        })
-        .build()
-        .fuse();
-        let drain = slog_envlogger::new(drain).fuse();
-        let drain = slog_async::Async::new(drain).build().fuse();
-
-        slog::Logger::root(drain, o!())
+    if !progress_bar.is_hidden() {
+        tracing_subscriber::fmt()
+            .with_env_filter(EnvFilter::from_default_env())
+            .with_writer(tracing_pg::ProgressBarWriter(progress_bar.clone()))
+            .init();
     } else {
-        let decorator = slog_term::TermDecorator::new().build();
-        let drain = slog_term::CompactFormat::new(decorator).build().fuse();
-        let drain = slog_envlogger::new(drain).fuse();
-        let drain = slog_async::Async::new(drain).build().fuse();
-
-        slog::Logger::root(drain, o!())
+        tracing_subscriber::fmt()
+            .with_env_filter(EnvFilter::from_default_env())
+            .init();
     };
 
     // Read test file
     let test_file = match tokio::fs::read_to_string(&options.tests).await {
         Ok(r) => r,
-        Err(e) => bail!("Failed to read test list file {:?}: {}", options.tests, e),
+        Err(e) => bail!("Failed to read test list file {:?}: {e}", options.tests),
     };
     let mut tests = parse_test_file(&test_file);
 
@@ -71,9 +60,9 @@ async fn real_main() -> Result<()> {
     let missing: Vec<_>;
     if !options.no_sort {
         // Run through deqp to sort
-        sorted_list = sort_with_deqp(&logger, &options.run_command, &tests)
+        sorted_list = sort_with_deqp(&options.run_command, &tests)
             .await
-            .map_err(|e| format_err!("Failed to sort test list: {}", e))?;
+            .map_err(|e| format_err!("Failed to sort test list: {e}"))?;
         // Search missing tests
         let mut orig = tests
             .iter()
@@ -102,7 +91,7 @@ async fn real_main() -> Result<()> {
         }
     }
 
-    info!(logger, "Running"; "command" => ?options.run_command);
+    info!(command = ?options.run_command, "Running");
 
     let run_options = RunOptions {
         args: options.run_command,
@@ -119,7 +108,6 @@ async fn real_main() -> Result<()> {
     let mut summary = Summary::default();
     tokio::select! {
         _ = run_tests_parallel(
-            &logger,
             &tests,
             &mut summary,
             &run_options,
@@ -128,7 +116,7 @@ async fn real_main() -> Result<()> {
             &progress_bar,
         ) => {}
         _ = tokio::signal::ctrl_c() => {
-            info!(logger, "Killed by sigint");
+            info!("Killed by sigint");
         }
     }
 
@@ -148,7 +136,6 @@ async fn real_main() -> Result<()> {
     }
 
     summary::write_summary(
-        &logger,
         &tests,
         &summary,
         run_options.fail_dir.as_deref(),
@@ -182,9 +169,19 @@ async fn real_main() -> Result<()> {
             not_run += 1;
         }
     }
-    info!(logger, "Tests finished"; "total" => tests.len() + missing.len(), "success" => success,
-        "not_supported" => not_supported, "fail" => fail, "crash" => crash, "timeout" => timeout,
-        "missing" => missing_count, "not_found" => missing.len(), "not_run" => not_run, "flake" => flake);
+    info!(
+        total = tests.len() + missing.len(),
+        success,
+        not_supported,
+        fail,
+        crash,
+        timeout,
+        missing = missing_count,
+        not_found = missing.len(),
+        not_run,
+        flake,
+        "Tests finished"
+    );
 
     Ok(())
 }

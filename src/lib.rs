@@ -19,16 +19,16 @@ use once_cell::sync::Lazy;
 use rand::rng;
 use rand::seq::SliceRandom;
 use serde::{Deserialize, Serialize};
-use slog::{Logger, debug, error, info, o, trace, warn};
 use tempfile::NamedTempFile;
 use thiserror::Error;
 use time::{Duration, OffsetDateTime};
 use tokio::io::{self, AsyncBufReadExt, BufReader};
 use tokio::process::{Child, ChildStderr, ChildStdout, Command};
 use tokio::time::Sleep;
+use tracing::{Instrument, debug, error, info, info_span, trace, warn};
 
-pub mod slog_pg;
 pub mod summary;
+pub mod tracing_pg;
 
 pub use summary::Summary;
 
@@ -307,7 +307,6 @@ enum Job<'a> {
 }
 
 pub struct RunDeqpState {
-    logger: Logger,
     pub pid: u32,
     timeout_duration: std::time::Duration,
     timeout: Pin<Box<Sleep>>,
@@ -331,7 +330,6 @@ pub struct RunDeqpState {
 }
 
 struct RunTestListState<'a, 'list> {
-    logger: Logger,
     /// Input to the process that was last started.
     tests: &'list [&'a str],
     options: &'a RunOptions,
@@ -410,20 +408,14 @@ impl<'a> From<DeqpErrorWithOutput> for JobEvent<'a> {
 }
 
 impl RunDeqpState {
-    fn new(
-        mut logger: Logger,
-        timeout_duration: std::time::Duration,
-        mut child: Child,
-    ) -> Result<Self, DeqpError> {
+    fn new(timeout_duration: std::time::Duration, mut child: Child) -> Result<Self, DeqpError> {
         let pid = child.id().ok_or_else(|| {
             DeqpError::SpawnFailed(std::io::Error::other("Failed to get child pid"))
         })?;
-        logger = logger.new(o!("pid" => pid));
 
         let stdout = child.stdout.take().unwrap();
         let stderr = child.stderr.take().unwrap();
         Ok(Self {
-            logger,
             pid,
             timeout_duration,
             timeout: Box::pin(tokio::time::sleep(timeout_duration)),
@@ -452,9 +444,9 @@ impl RunDeqpState {
                 return None;
             }
             Ok(Some(r)) => r,
-            Err(e) => {
+            Err(error) => {
                 self.stdout_finished = true;
-                debug!(self.logger, "Failed to read stdout of process"; "error" => %e);
+                debug!(pid = self.pid, %error, "Failed to read stdout of process");
                 return None;
             }
         };
@@ -514,14 +506,14 @@ impl RunDeqpState {
                 return;
             }
             Ok(Some(r)) => r,
-            Err(e) => {
+            Err(error) => {
                 self.stderr_finished = true;
-                debug!(self.logger, "Failed to read stderr of process"; "error" => %e);
+                debug!(pid = self.pid, %error, "Failed to read stderr of process");
                 return;
             }
         };
         if l.contains("FATAL ERROR: ") {
-            warn!(self.logger, "Deqp encountered fatal error"; "error" => &l);
+            warn!(pid = self.pid, error = l, "Deqp encountered fatal error");
             self.has_fatal_error = true;
         }
         self.stderr.push_str(&l);
@@ -530,9 +522,8 @@ impl RunDeqpState {
 }
 
 impl<'a, 'list> RunTestListState<'a, 'list> {
-    fn new(logger: Logger, tests: &'list [&'a str], options: &'a RunOptions) -> Self {
+    fn new(tests: &'list [&'a str], options: &'a RunOptions) -> Self {
         RunTestListState {
-            logger,
             tests,
             options,
             running: None,
@@ -600,16 +591,15 @@ impl<'a, 'list> RunTestListState<'a, 'list> {
                 };
                 let new_dir = dir.join(&dir_name);
                 if !new_dir.exists() {
-                    if let Err(e) = std::fs::create_dir_all(&new_dir) {
-                        error!(self.logger, "Failed to create failure directory";
-                                "error" => %e);
+                    if let Err(error) = std::fs::create_dir_all(&new_dir) {
+                        error!(%error, "Failed to create failure directory");
                         return;
                     }
                     self.fail_dir = Some(dir_name);
                     // Write reproduce-list.txt
                     match std::fs::File::create(new_dir.join(TEST_LIST_FILE)) {
                         Ok(mut f) => {
-                            if let Err(e) = (|| -> Result<(), std::io::Error> {
+                            if let Err(error) = (|| -> Result<(), std::io::Error> {
                                 // Write options
                                 write!(&mut f, "#!")?;
                                 if self
@@ -638,13 +628,11 @@ impl<'a, 'list> RunTestListState<'a, 'list> {
                                 }
                                 Ok(())
                             })() {
-                                error!(self.logger, "Failed to write reproduce list";
-                                        "error" => %e);
+                                error!(%error, "Failed to write reproduce list");
                             }
                         }
-                        Err(e) => {
-                            error!(self.logger, "Failed to create reproduce list file";
-                                    "error" => %e);
+                        Err(error) => {
+                            error!(%error, "Failed to create reproduce list file");
                         }
                     }
                     break;
@@ -672,19 +660,16 @@ impl<'a, 'list> RunTestListState<'a, 'list> {
                 .open(fail_dir.join(STDERR_FILE))
             {
                 Ok(mut f) => {
-                    if let Err(e) = f.write_all(stderr.as_bytes()) {
-                        error!(self.logger, "Failed to write stderr file"; "error" => %e);
+                    if let Err(error) = f.write_all(stderr.as_bytes()) {
+                        error!(%error, "Failed to write stderr file");
                     }
                 }
-                Err(e) => {
-                    error!(self.logger, "Failed to create stderr file"; "error" => %e);
+                Err(error) => {
+                    error!(%error, "Failed to create stderr file");
                 }
             }
         } else {
-            warn!(
-                self.logger,
-                "Tried to save stderr without a fail dir set, ignoring"
-            );
+            warn!("Tried to save stderr without a fail dir set, ignoring");
         }
     }
 
@@ -712,20 +697,20 @@ impl<'a, 'list> RunTestListState<'a, 'list> {
             .collect()
     }
 
-    fn handle_test_start(&mut self, name: &str) -> Vec<RunTestListEvent<'a, 'list>> {
-        trace!(self.logger, "Test started"; "test" => name);
+    fn handle_test_start(&mut self, test: &str) -> Vec<RunTestListEvent<'a, 'list>> {
+        trace!(test, "Test started");
         let next_test = self.last_finished.map(|i| i + 1).unwrap_or_default();
-        if let Some(i) = self.tests[next_test..].iter().position(|t| t == &name) {
+        if let Some(i) = self.tests[next_test..].iter().position(|t| t == &test) {
             self.cur_test = Some((next_test + i, OffsetDateTime::now_utc()));
             self.get_missing(i)
         } else {
-            warn!(self.logger, "Executing unknown test"; "test" => name);
+            warn!(test, "Executing unknown test");
             Vec::new()
         }
     }
 
     fn handle_test_end(&mut self, result: TestResult) -> Option<RunTestListEvent<'a, 'list>> {
-        trace!(self.logger, "Test end"; "cur_test" => ?self.cur_test, "result" => ?result);
+        trace!(?result, cur_test = ?self.cur_test, "Test end");
         if let Some(cur_test) = self.cur_test.take() {
             self.last_finished = Some(cur_test.0);
             let duration = OffsetDateTime::now_utc() - cur_test.1;
@@ -751,15 +736,13 @@ impl<'a, 'list> RunTestListState<'a, 'list> {
                 args: &self.options.args,
             }))
         } else {
-            warn!(self.logger, "Finished test without starting a test";
-                "last-finished" => ?self.last_finished.map(|i| self.tests[i]));
+            warn!(last_finished = ?self.last_finished.map(|i| self.tests[i]), "Finished test without starting a test");
             None
         }
     }
 
     fn handle_finished(&mut self, state: RunDeqpState) -> Vec<RunTestListEvent<'a, 'list>> {
-        trace!(self.logger, "Finished"; "result" => ?state.finished_result,
-            "stdout" => &state.stdout, "stderr" => &state.stderr);
+        trace!(result = ?state.finished_result, stdout = state.stdout, stderr = state.stderr, "Finished");
 
         let mut is_failure = true;
         let pid = state.pid;
@@ -773,8 +756,7 @@ impl<'a, 'list> RunTestListState<'a, 'list> {
                 .map(Result::is_ok)
                 .unwrap_or_default()
             {
-                warn!(self.logger, "test not finished but deqp exited successful, count as failure";
-                    "cur_test" => self.tests[cur_test.0], "started" => %cur_test.1);
+                warn!(cur_test = self.tests[cur_test.0], started = %cur_test.1, "test not finished but deqp exited successful, count as failure");
             }
 
             // Continue testing
@@ -801,21 +783,21 @@ impl<'a, 'list> RunTestListState<'a, 'list> {
                 args: &self.options.args,
             });
 
-            let mut res = Vec::new();
+            let mut result = Vec::new();
             if let Some(Err(e)) = state.finished_result
                 && e.is_fatal()
             {
-                res.push(RunTestListEvent::DeqpError(DeqpErrorWithOutput {
+                result.push(RunTestListEvent::DeqpError(DeqpErrorWithOutput {
                     error: e,
                     stdout: String::new(),
                 }));
             }
-            res.push(result_data);
+            result.push(result_data);
 
-            trace!(self.logger, "Test finish returns"; "result" => ?res);
-            res
-        } else if let Some(e) = state.finished_result.map(Result::err).unwrap_or_else(|| {
-            error!(self.logger, "Process result is not set, aborting"; "pid" => pid);
+            trace!(?result, "Test finish returns");
+            result
+        } else if let Some(error) = state.finished_result.map(Result::err).unwrap_or_else(|| {
+            error!(pid, "Process result is not set, aborting");
             Some(DeqpError::NoProcessResult)
         }) {
             if let Some(last_finished) = self.last_finished {
@@ -825,9 +807,9 @@ impl<'a, 'list> RunTestListState<'a, 'list> {
                 // Mark rest of tests as missing
                 let mut r = self.get_missing(self.tests.len() - last_finished - 1);
                 self.tests = &[];
-                if e.is_fatal() {
+                if error.is_fatal() {
                     r.push(RunTestListEvent::DeqpError(DeqpErrorWithOutput {
-                        error: e,
+                        error,
                         stdout: state.stdout,
                     }));
                 }
@@ -836,7 +818,7 @@ impl<'a, 'list> RunTestListState<'a, 'list> {
                 self.create_fail_dir(UNKNOWN_TEST_NAME);
                 // No test executed, counts as fatal error
                 self.tests = &[];
-                warn!(self.logger, "Deqp exited without running tests, aborting"; "error" => ?e);
+                warn!(?error, "Deqp exited without running tests, aborting");
                 vec![RunTestListEvent::DeqpError(DeqpErrorWithOutput {
                     error: DeqpError::NoTestsRun,
                     stdout: state.stdout,
@@ -844,14 +826,13 @@ impl<'a, 'list> RunTestListState<'a, 'list> {
             }
         } else {
             is_failure = false;
-            let r = if let Some(last_finished) = self.last_finished {
+            let r = if let Some(last) = self.last_finished {
                 // Mark rest of tests as missing
-                debug!(self.logger, "not all missing"; "tests" => ?self.tests,
-                    "last" => last_finished);
-                self.get_missing(self.tests.len() - last_finished - 1)
+                debug!(tests = ?self.tests, last, "not all missing");
+                self.get_missing(self.tests.len() - last - 1)
             } else {
                 // No test executed, counts all tests as missing
-                debug!(self.logger, "all missing"; "tests" => ?self.tests);
+                debug!(tests = ?self.tests, "all missing");
                 self.get_missing(self.tests.len())
             };
             self.tests = &[];
@@ -870,13 +851,12 @@ impl<'a, 'list> RunTestListState<'a, 'list> {
 
 impl<'a> Job<'a> {
     /// Returns new jobs for failed tests
-    fn run(self, logger: Logger, options: &'a RunOptions) -> impl Stream<Item = JobEvent<'a>> {
+    fn run(self, options: &'a RunOptions) -> impl Stream<Item = JobEvent<'a>> {
         match self {
             Self::FirstRun { list } => {
-                let logger2 = logger.clone();
                 let res: Box<dyn Stream<Item = _> + Send + Unpin> =
-                    Box::new(run_test_list(logger, list, options).flat_map(move |r| {
-                        trace!(logger2, "First run test result");
+                    Box::new(run_test_list(list, options).flat_map(move |r| {
+                        trace!("First run test result");
                         match r {
                             RunTestListEvent::TestResult(res) => {
                                 let is_failure = res.data.result.variant.is_failure();
@@ -900,10 +880,9 @@ impl<'a> Job<'a> {
             }
             Self::SecondRun { list } => {
                 // Run only the failing test (which is the last in the list)
-                let logger2 = logger.clone();
                 Box::new(
-                    run_test_list(logger, &list[list.len() - 1..], options).flat_map(move |r| {
-                        trace!(logger2, "Second run test result");
+                    run_test_list(&list[list.len() - 1..], options).flat_map(move |r| {
+                        trace!("Second run test result");
                         match r {
                             RunTestListEvent::TestResult(res) => {
                                 let is_failure = res.data.result.variant.is_failure();
@@ -925,11 +904,10 @@ impl<'a> Job<'a> {
             }
             Self::ThirdRun { list } => {
                 // Run the whole list again
-                let logger2 = logger.clone();
                 let last_test = list[list.len() - 1];
-                debug!(logger2, "Third run test"; "len" => list.len());
-                Box::new(run_test_list(logger, list, options).flat_map(move |r| {
-                    trace!(logger2, "Third run test result");
+                debug!(len = list.len(), "Third run test");
+                Box::new(run_test_list(list, options).flat_map(move |r| {
+                    trace!("Third run test result");
                     match r {
                         RunTestListEvent::TestResult(res) => {
                             if res.data.name != last_test {
@@ -949,10 +927,11 @@ impl<'a> Job<'a> {
                             } else {
                                 if res.run_list != list {
                                     // We only ran a subset (a test in-between probably crashed)
-                                    info!(logger2, "Reproducing failure in third run failed \
-                                        because not the whole test list was run, this can happen \
-                                        because of intermediate failures";
-                                        "last_failing_test" => list[list.len() - res.run_list.len()]
+                                    info!(
+                                        last_failing_test = list[list.len() - res.run_list.len()],
+                                        "Reproducing failure in third run failed because not the \
+                                         whole test list was run, this can happen because of \
+                                         intermediate failures"
                                     );
                                 }
 
@@ -970,29 +949,28 @@ impl<'a> Job<'a> {
                 let last_test = list[list.len() - 1];
                 Box::new(r#gen!({
                     if list.len() <= 2 {
-                        trace!(logger, "Bisect succeeded, two tests or less left");
+                        trace!("Bisect succeeded, two tests or less left");
                         return;
                     }
 
                     let test_list = match state {
                         BisectState::Unknown => {
                             // Test with last half
-                            trace!(logger, "Bisect run with last half");
+                            trace!("Bisect run with last half");
                             Cow::Borrowed(&list[split_i..])
                         }
                         BisectState::SucceedingWithLastHalf => {
                             // Test with first half
                             let mut tests = list[..split_i].to_vec();
                             tests.push(last_test);
-                            trace!(logger, "Bisect run with first half"; "tests" => ?tests);
+                            trace!(?tests, "Bisect run with first half");
                             Cow::Owned(tests)
                         }
                     };
 
-                    let mut test_list_stream =
-                        run_test_list(logger.clone(), test_list.as_ref(), options);
+                    let mut test_list_stream = run_test_list(test_list.as_ref(), options);
                     while let Some(r) = test_list_stream.next().await {
-                        trace!(logger, "Bisect run test result");
+                        trace!("Bisect run test result");
                         match r {
                             RunTestListEvent::TestResult(res) => {
                                 if res.data.name != last_test {
@@ -1012,10 +990,7 @@ impl<'a> Job<'a> {
                                     yield_!(new_job);
                                 } else {
                                     if state == BisectState::SucceedingWithLastHalf {
-                                        debug!(
-                                            logger,
-                                            "Unable to reproduce failure with either half"
-                                        );
+                                        debug!("Unable to reproduce failure with either half");
                                     } else {
                                         // The error can be in the other half
                                         let new_job = JobEvent::NewJob(Job::Bisect {
@@ -1076,12 +1051,11 @@ pub fn shuffle_in_batches(tests: &mut [&str], batch_size: usize) {
 ///
 /// Returns the pid of the started process and a stream of events.
 pub fn run_deqp<S: AsRef<OsStr> + std::fmt::Debug>(
-    logger: Logger,
     timeout_duration: std::time::Duration,
     args: &[S],
     env: &[(&str, &str)],
 ) -> Result<RunDeqpState, DeqpError> {
-    debug!(logger, "Start deqp"; "args" => ?args);
+    debug!(?args, "Start deqp");
     let mut cmd = Command::new(&args[0]);
     cmd.args(&args[1..])
         .envs(env.iter().cloned())
@@ -1089,9 +1063,9 @@ pub fn run_deqp<S: AsRef<OsStr> + std::fmt::Debug>(
         .stderr(Stdio::piped())
         .kill_on_drop(true);
 
-    trace!(logger, "Run deqp"; "args" => ?args);
+    trace!(?args, "Run deqp");
     let child = cmd.spawn().map_err(DeqpError::SpawnFailed)?;
-    RunDeqpState::new(logger, timeout_duration, child)
+    RunDeqpState::new(timeout_duration, child)
 }
 
 /// Sort a list of tests into the order that deqp will run them in by running deqp with
@@ -1101,7 +1075,6 @@ pub fn run_deqp<S: AsRef<OsStr> + std::fmt::Debug>(
 /// list may be longer or shorter than the original list if *-expressions were used or names do not
 /// exist.
 pub async fn sort_with_deqp<S: AsRef<OsStr>>(
-    logger: &Logger,
     args: &[S],
     tests: &[&str],
 ) -> Result<Vec<String>, DeqpSortError> {
@@ -1114,7 +1087,7 @@ pub async fn sort_with_deqp<S: AsRef<OsStr>>(
     let mut args = args.iter().map(|s| s.as_ref()).collect::<Vec<_>>();
     args.push(temp_file.path().as_os_str());
     args.push("--deqp-runmode=stdout-caselist".as_ref());
-    trace!(logger, "Run deqp for sorting"; "args" => ?args);
+    trace!(?args, "Run deqp for sorting");
     let mut cmd = Command::new(args[0]);
     cmd.args(&args[1..])
         .stdout(Stdio::piped())
@@ -1206,15 +1179,14 @@ impl Stream for RunDeqpState {
                 }
 
                 if !self.has_timeout && self.timeout.as_mut().poll(ctx).is_ready() {
-                    debug!(self.logger, "Detected timeout");
+                    debug!("Detected timeout");
                     self.has_timeout = true;
                     self.finished_result = Some(Err(DeqpError::Timeout));
                     // Kill deqp
-                    let logger = self.logger.clone();
                     let mut child = self.child.take().unwrap();
                     tokio::spawn(async move {
-                        if let Err(e) = child.kill().await {
-                            error!(logger, "Failed to kill deqp after timeout"; "error" => %e);
+                        if let Err(error) = child.kill().await {
+                            error!(%error, "Failed to kill deqp after timeout");
                         }
                     });
                     return Poll::Ready(None);
@@ -1236,11 +1208,10 @@ impl Stream for RunDeqpState {
 ///
 /// Also record missing tests and the test lists when failures occured.
 pub fn run_test_list<'a, 'list>(
-    logger: Logger,
     tests: &'list [&'a str],
     options: &'a RunOptions,
 ) -> impl Stream<Item = RunTestListEvent<'a, 'list>> + Send + Unpin {
-    let mut state = RunTestListState::new(logger, tests, options);
+    let mut state = RunTestListState::new(tests, options);
 
     r#gen!({
         loop {
@@ -1257,11 +1228,11 @@ pub fn run_test_list<'a, 'list>(
                         return;
                     }
                 };
-                match run_deqp(state.logger.clone(), options.timeout, &args, &[]) {
+                match run_deqp(options.timeout, &args, &[]) {
                     Ok(r) => state.running = Some(r),
-                    Err(e) => {
+                    Err(error) => {
                         yield_!(RunTestListEvent::DeqpError(DeqpErrorWithOutput {
-                            error: e,
+                            error,
                             stdout: "Failed to start deqp process".into(),
                         }));
                         return;
@@ -1295,25 +1266,22 @@ pub fn run_test_list<'a, 'list>(
 }
 
 fn print_progress(
-    logger: &Logger,
     start: Instant,
     last_progress_print: &mut Instant,
-    finished: u64,
-    total: u64,
+    finished_tests: u64,
+    total_tests: u64,
 ) {
     let now = Instant::now();
     if now.duration_since(*last_progress_print) > UPDATE_PROGRESS_INTERVAL {
-        let eta_secs =
-            now.duration_since(start).as_secs_f32() / finished as f32 * (total - finished) as f32;
+        let eta_secs = now.duration_since(start).as_secs_f32() / finished_tests as f32
+            * (total_tests - finished_tests) as f32;
         let eta = std::time::Duration::from_secs_f32(eta_secs);
-        info!(logger, "Progress update"; "finished_tests" => finished, "total_tests" => total,
-            "eta" => ?eta);
+        info!(finished_tests, total_tests, ?eta, "Progress update");
         *last_progress_print = now;
     }
 }
 
 pub async fn run_tests_parallel<'a>(
-    logger: &'a Logger,
     tests: &'a [&'a str],
     // Map test names to summary entries
     summary: &mut Summary<'a>,
@@ -1343,8 +1311,8 @@ pub async fn run_tests_parallel<'a>(
     let mut log = if let Some(log_file) = log_file {
         match std::fs::File::create(log_file) {
             Ok(r) => Some(r),
-            Err(e) => {
-                error!(logger, "Failed to create log file"; "error" => %e);
+            Err(error) => {
+                error!(%error, "Failed to create log file");
                 None
             }
         }
@@ -1357,18 +1325,21 @@ pub async fn run_tests_parallel<'a>(
             && fails + crashes >= options.max_failures
             && !pending_jobs.is_empty()
         {
-            warn!(logger, "The number of failures is high, skip remaining jobs";
-                "max_failures" => options.max_failures, "failures" => fails + crashes);
+            warn!(
+                max_failures = options.max_failures,
+                failures = fails + crashes,
+                "The number of failures is high, skip remaining jobs"
+            );
             // Do not start new jobs when we have our max number of failures
             pending_jobs.clear();
         }
 
         while job_executor.len() < job_count {
             if let Some(job) = pending_jobs.pop_front() {
-                let logger = logger.new(o!("job" => job_id));
+                let span = info_span!("job", job = job_id);
                 job_id += 1;
-                debug!(logger, "Adding job to queue");
-                job_executor.push(job.run(logger, options).into_future());
+                span.in_scope(|| debug!("Adding job to queue"));
+                job_executor.push(job.run(options).into_future().instrument(span).boxed());
             } else {
                 break;
             }
@@ -1377,7 +1348,7 @@ pub async fn run_tests_parallel<'a>(
         match job_executor.next().await {
             None => break,
             Some((None, _)) => {
-                debug!(logger, "Job finished");
+                debug!("Job finished");
             }
             Some((Some(event), job_stream)) => {
                 let mut fatal_error = false;
@@ -1391,7 +1362,6 @@ pub async fn run_tests_parallel<'a>(
                                 debug_assert_eq!(progress_bar.position(), log_entry_id);
                                 if progress_bar.is_hidden() {
                                     print_progress(
-                                        logger,
                                         start_instant,
                                         &mut last_progress_print,
                                         progress_bar.position(),
@@ -1431,9 +1401,8 @@ pub async fn run_tests_parallel<'a>(
                                             ));
                                             progress_bar.tick();
                                             if progress_bar.is_hidden() {
-                                                info!(logger, "Test failed";
-                                                    "test" => res.data.name,
-                                                    "result" => ?res.data.result.variant);
+                                                info!(test = res.data.name,
+                                                    result = ?res.data.result.variant, "Test failed");
                                             }
                                         }
                                         entry.insert((
@@ -1455,15 +1424,14 @@ pub async fn run_tests_parallel<'a>(
                         }
 
                         if let Some(f) = &mut log {
-                            if let Err(e) = serde_json::to_writer(&mut *f, &entry) {
-                                error!(logger, "Failed to write entry into log file";
-                                    "error" => %e, "entry" => ?entry);
+                            if let Err(error) = serde_json::to_writer(&mut *f, &entry) {
+                                error!(%error, ?entry, "Failed to write entry into log file");
                             }
-                            if let Err(e) = f.write_all(b"\n") {
-                                error!(logger, "Failed to write into log file"; "error" => %e);
+                            if let Err(error) = f.write_all(b"\n") {
+                                error!(%error, "Failed to write into log file");
                             }
                         } else {
-                            trace!(logger, "Log"; "entry" => ?entry);
+                            trace!(?entry, "Log");
                         }
                     }
                     JobEvent::NewJob(job) => {
@@ -1471,7 +1439,7 @@ pub async fn run_tests_parallel<'a>(
                         if let Job::Bisect { list, .. } = &job
                             && list.len() <= 2
                         {
-                            trace!(logger, "Bisect succeeded, two tests or less left");
+                            trace!("Bisect succeeded, two tests or less left");
                             bisect_finished = true;
                         }
                         if !bisect_finished {
@@ -1481,7 +1449,6 @@ pub async fn run_tests_parallel<'a>(
                             progress_bar.inc_length(1);
                             if progress_bar.is_hidden() {
                                 print_progress(
-                                    logger,
                                     start_instant,
                                     &mut last_progress_print,
                                     progress_bar.position(),
@@ -1493,12 +1460,12 @@ pub async fn run_tests_parallel<'a>(
                 }
 
                 if fatal_error {
-                    info!(logger, "A fatal error occured, aborting all pending jobs");
+                    info!("A fatal error occured, aborting all pending jobs");
                     progress_bar.finish_and_clear();
                     pending_jobs.clear();
                     job_executor = stream::FuturesUnordered::new();
                 } else {
-                    job_executor.push(job_stream.into_future());
+                    job_executor.push(job_stream.into_future().boxed());
                 }
             }
         }
@@ -1513,16 +1480,10 @@ mod tests {
     use std::sync::Mutex;
 
     use anyhow::Result;
-    use slog::Drain;
 
     use super::*;
 
-    pub(crate) fn create_logger() -> Logger {
-        let decorator = slog_term::PlainDecorator::new(slog_term::TestStdoutWriter);
-        let drain = Mutex::new(slog_term::FullFormat::new(decorator).build()).fuse();
-
-        slog::Logger::root(drain, o!())
-    }
+    static TRACING: Lazy<()> = Lazy::new(|| tracing_subscriber::fmt().with_test_writer().init());
 
     async fn check_tests(args: &[&str], expected: &[(&str, TestResultType)]) -> Result<()> {
         check_tests_with_summary(args, expected, |_| {}).await
@@ -1533,17 +1494,16 @@ mod tests {
         expected: &[(&str, TestResultType)],
         check: F,
     ) -> Result<()> {
+        Lazy::force(&TRACING);
         // Read test file
         let test_file = tokio::fs::read_to_string("logs/in").await?;
         let tests = parse_test_file(&test_file);
         assert_eq!(tests.len(), 18, "Test size does not match");
 
-        let logger = create_logger();
-        check_tests_intern(&logger, args, expected, check, &tests, true, BATCH_SIZE).await
+        check_tests_intern(args, expected, check, &tests, true, BATCH_SIZE).await
     }
 
     async fn check_tests_intern<F: for<'a> FnOnce(Summary<'a>)>(
-        logger: &Logger,
         args: &[&str],
         expected: &[(&str, TestResultType)],
         check: F,
@@ -1564,7 +1524,6 @@ mod tests {
         let mut summary = Summary::default();
         let pb = ProgressBar::hidden();
         run_tests_parallel(
-            logger,
             tests,
             &mut summary,
             &run_options,
@@ -2198,6 +2157,7 @@ mod tests {
     #[tokio::test]
     #[should_panic(expected = "Test result does not match for test")]
     async fn test_sort_no_shuffle_no_sort() {
+        Lazy::force(&TRACING);
         let batch_size = 10;
         let expected = test_sort_list(batch_size);
         let expected = expected
@@ -2206,9 +2166,7 @@ mod tests {
             .collect::<Vec<_>>();
 
         let tests = expected.iter().map(|e| e.0).collect::<Vec<_>>();
-        let logger = create_logger();
         let _ = check_tests_intern(
-            &logger,
             &["test/test-sorted.sh"],
             &expected,
             |_| {},
@@ -2221,6 +2179,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_sort_no_shuffle_sort() -> Result<()> {
+        Lazy::force(&TRACING);
         let batch_size = 10;
         let expected = test_sort_list(batch_size);
         let expected = expected
@@ -2229,11 +2188,9 @@ mod tests {
             .collect::<Vec<_>>();
 
         let tests = expected.iter().map(|e| e.0).collect::<Vec<_>>();
-        let logger = create_logger();
-        let sorted_list = sort_with_deqp(&logger, &["test/test-sorted.sh"], &tests).await?;
+        let sorted_list = sort_with_deqp(&["test/test-sorted.sh"], &tests).await?;
         let sorted_tests = sorted_list.iter().map(|t| t.as_str()).collect::<Vec<_>>();
         check_tests_intern(
-            &logger,
             &["test/test-sorted.sh"],
             &expected,
             |_| {},
@@ -2249,6 +2206,7 @@ mod tests {
     #[tokio::test]
     #[should_panic(expected = "Test result does not match for test")]
     async fn test_sort_shuffle_no_sort() {
+        Lazy::force(&TRACING);
         let batch_size = 10;
         let expected = test_sort_list(batch_size);
         let expected = expected
@@ -2257,10 +2215,8 @@ mod tests {
             .collect::<Vec<_>>();
 
         let mut tests = expected.iter().map(|e| e.0).collect::<Vec<_>>();
-        let logger = create_logger();
         shuffle_in_batches(&mut tests, batch_size);
         let _ = check_tests_intern(
-            &logger,
             &["test/test-sorted.sh"],
             &expected,
             |_| {},
@@ -2273,6 +2229,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_sort_shuffle_sort() -> Result<()> {
+        Lazy::force(&TRACING);
         let batch_size = 10;
         let expected = test_sort_list(batch_size);
         let expected = expected
@@ -2281,12 +2238,10 @@ mod tests {
             .collect::<Vec<_>>();
 
         let tests = expected.iter().map(|e| e.0).collect::<Vec<_>>();
-        let logger = create_logger();
-        let sorted_list = sort_with_deqp(&logger, &["test/test-sorted.sh"], &tests).await?;
+        let sorted_list = sort_with_deqp(&["test/test-sorted.sh"], &tests).await?;
         let mut sorted_tests = sorted_list.iter().map(|t| t.as_str()).collect::<Vec<_>>();
         shuffle_in_batches(&mut sorted_tests, batch_size);
         check_tests_intern(
-            &logger,
             &["test/test-sorted.sh"],
             &expected,
             |_| {},
@@ -2301,7 +2256,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_no_retry() -> Result<()> {
-        let logger = create_logger();
+        Lazy::force(&TRACING);
         let test_file = tokio::fs::read_to_string("logs/in").await?;
         let tests = parse_test_file(&test_file);
         assert_eq!(tests.len(), 18, "Test size does not match");
@@ -2392,7 +2347,6 @@ mod tests {
         ];
 
         check_tests_intern(
-            &logger,
             &["test/test-runner.sh", "logs/d", "/dev/null", "0"],
             &expected,
             |summary| {

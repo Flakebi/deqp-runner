@@ -9,7 +9,7 @@ edition = "2024"
 [features]
 default = ["bin"]
 # Build binaries
-bin = ["anyhow", "clap", "num_cpus", "slog-async", "slog-envlogger", "slog-term", "tokio/rt", "tokio/signal"]
+bin = ["anyhow", "clap", "num_cpus", "tokio/rt", "tokio/signal", "tracing-subscriber"]
 
 [[bin]]
 name = "deqp-runner"
@@ -28,16 +28,15 @@ rand = "0.9"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 junit-report = "0.8"
-slog = { version = "2", features = ["max_level_trace", "release_max_level_debug"] }
-slog-async = { version = "2", optional = true }
-slog-envlogger = { version = "2", optional = true }
-slog-term = { version = "2", optional = true }
 tempfile = "3"
 thiserror = "2"
 time = { version = "0.3", features = ["serde"] }
 tokio = { version = "1", features = ["fs", "io-util", "macros", "process", "sync", "time"] }
 tokio-stream = "0.1"
+tracing = { version = "0.1", features = ["max_level_trace", "release_max_level_debug"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter"], optional = true }
 
 [dev-dependencies]
 anyhow = "1"
 num_cpus = "1"
+tracing-subscriber = "0.3"

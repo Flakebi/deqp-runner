@@ -5,8 +5,8 @@ use std::io::{BufRead, BufReader};
 use std::path::Path;
 
 use serde::{Deserialize, Serialize};
-use slog::{Logger, warn};
 use thiserror::Error;
+use tracing::warn;
 
 use crate::{TestResultData, TestResultType};
 
@@ -40,7 +40,6 @@ pub struct SummaryEntry<'a> {
 
 /// Write summary csv and xml file.
 pub fn write_summary(
-    logger: &Logger,
     tests: &[&str],
     summary: &Summary,
     fail_dir: Option<&Path>,
@@ -70,7 +69,7 @@ pub fn write_summary(
 
     // Write xml
     if let Some(file) = xml_file {
-        let report = create_xml_summary(logger, tests, summary, fail_dir)?;
+        let report = create_xml_summary(tests, summary, fail_dir)?;
         let mut file = std::fs::File::create(file).map_err(WriteSummaryError::OpenFile)?;
         report
             .write_xml(&mut file)
@@ -80,7 +79,6 @@ pub fn write_summary(
 }
 
 pub fn create_xml_summary(
-    logger: &Logger,
     tests: &[&str],
     summary: &Summary,
     fail_dir: Option<&Path>,
@@ -97,7 +95,7 @@ pub fn create_xml_summary(
                 if let Some(run) = &entry.1 {
                     let mut test = if let TestResultType::Flake(res) = &entry.0.result {
                         let mut t = TestCase::success(t, run.duration);
-                        t.set_system_out(&format!("{}\nFlake({:?})", run.result.stdout, res));
+                        t.set_system_out(&format!("{}\nFlake({res:?})", run.result.stdout));
                         t
                     } else {
                         let mut t = TestCase::failure(
@@ -120,9 +118,8 @@ pub fn create_xml_summary(
                                 for l in BufReader::new(f).lines() {
                                     let l = match l {
                                         Ok(l) => l,
-                                        Err(e) => {
-                                            warn!(logger, "Failed to read stderr file";
-                                                "path" => ?path, "error" => %e);
+                                        Err(error) => {
+                                            warn!(?path, %error, "Failed to read stderr file");
                                             break;
                                         }
                                     };
@@ -141,9 +138,8 @@ pub fn create_xml_summary(
                                 }
                                 test.set_system_err(&last_lines_str);
                             }
-                            Err(e) => {
-                                warn!(logger, "Failed to open stderr file"; "path" => ?path,
-                                    "error" => %e);
+                            Err(error) => {
+                                warn!(?path, %error, "Failed to open stderr file");
                             }
                         }
                     }
@@ -189,7 +185,7 @@ mod tests {
     use crate::*;
 
     async fn check_tests(args: &[&str]) -> Result<Report> {
-        let logger = crate::tests::create_logger();
+        Lazy::force(&crate::tests::TRACING);
         let run_options = RunOptions {
             args: args.iter().map(|s| s.to_string()).collect(),
             capture_dumps: true,
@@ -208,7 +204,6 @@ mod tests {
         let mut summary = Summary::default();
         let pb = ProgressBar::hidden();
         run_tests_parallel(
-            &logger,
             &tests,
             &mut summary,
             &run_options,
@@ -219,7 +214,6 @@ mod tests {
         .await;
 
         Ok(create_xml_summary(
-            &logger,
             &tests,
             &summary,
             run_options.fail_dir.as_deref(),
