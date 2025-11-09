@@ -180,6 +180,7 @@ pub fn create_xml_summary(
 mod tests {
     use anyhow::Result;
     use junit_report::Report;
+    use once_cell::sync::Lazy;
 
     use super::*;
     use crate::*;

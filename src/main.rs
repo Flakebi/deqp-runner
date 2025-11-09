@@ -8,6 +8,8 @@ use indicatif::ProgressBar;
 use tracing::info;
 use tracing_subscriber::EnvFilter;
 
+use crate::deqp::*;
+
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<()> {
     real_main().await
