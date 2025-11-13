@@ -3,6 +3,10 @@ Run the Vulkan Conformance Test Suite in parallel and robustly.
 
 This is fork/rewrite of the mesa [parallel deqp runner](https://gitlab.freedesktop.org/mesa/parallel-deqp-runner).
 
+## Alternatives
+
+You might be looking for mesa’s [deqp-runner](https://gitlab.freedesktop.org/mesa/deqp-runner), which is a Rust project with similar goals.
+
 ## Features
 
 - Run tests in parallel
